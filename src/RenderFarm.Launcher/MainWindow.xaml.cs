@@ -9,6 +9,7 @@ namespace RenderFarm.Launcher;
 public partial class MainWindow : Window
 {
     private readonly string settingsPath = RenderFarmLauncher.ResolveSettingsPath(null);
+    private RoleLaunchResult? activeControllerLaunch;
     private bool controllerVerified;
 
     public MainWindow()
@@ -65,7 +66,7 @@ public partial class MainWindow : Window
 
     private void UpdateRolePanels()
     {
-        if (ControllerPanel is null || WorkerPanel is null || InstallServiceButton is null)
+        if (ControllerPanel is null || WorkerPanel is null || StatusHeadlineText is null)
         {
             return;
         }
@@ -73,11 +74,13 @@ public partial class MainWindow : Window
         var isWorker = WorkerRole.IsChecked == true;
         ControllerPanel.Visibility = isWorker ? Visibility.Collapsed : Visibility.Visible;
         WorkerPanel.Visibility = isWorker ? Visibility.Visible : Visibility.Collapsed;
-        InstallServiceButton.Visibility = isWorker ? Visibility.Visible : Visibility.Collapsed;
         controllerVerified = false;
         SetStatus(isWorker
-            ? "Worker mode selected. Enter the controller URL or enable LAN discovery, then save settings."
-            : "Controller mode selected. Start the controller, then open the dashboard URL shown by the app.");
+            ? "Worker mode selected."
+            : "Controller mode selected.",
+            isWorker
+                ? "Enter the controller URL or enable LAN discovery, then start this machine as a render worker."
+                : "Start the controller dashboard, then open it in your browser when the launcher reports it is ready.");
     }
 
     private void SaveSettings_Click(object sender, RoutedEventArgs e)
@@ -86,7 +89,7 @@ public partial class MainWindow : Window
         {
             var settings = ReadSettingsFromUi();
             settings.Save(settingsPath);
-            SetStatus($"Saved settings to {settingsPath}");
+            SetStatus("Settings saved.", settingsPath);
         }
         catch (Exception ex)
         {
@@ -94,27 +97,69 @@ public partial class MainWindow : Window
         }
     }
 
-    private void StartRole_Click(object sender, RoutedEventArgs e)
+    private async void StartRole_Click(object sender, RoutedEventArgs e)
     {
+        StartRoleButton.IsEnabled = false;
         try
         {
             var settings = ReadSettingsFromUi();
             settings.Save(settingsPath);
-            var result = RenderFarmLauncher.StartRole(settings, waitForExit: false);
-            if (result == 0)
+            var previousControllerProcess = activeControllerLaunch?.Process;
+            if (previousControllerProcess is { HasExited: true })
             {
-                SetStatus(settings.Role == "controller"
-                    ? $"Controller start requested. Dashboard: {RenderFarmLauncher.GetDashboardUrl(settings)}"
-                    : "Worker start requested. Watch the controller dashboard for approval and heartbeat state.");
+                previousControllerProcess.Dispose();
+                activeControllerLaunch = null;
+            }
+
+            var isController = string.Equals(settings.Role, "controller", StringComparison.OrdinalIgnoreCase);
+            if (isController)
+            {
+                if (!RenderFarmLauncher.TryBuildDashboardUrl(settings, out var dashboardUrl, out var error))
+                {
+                    SetStatus("Controller dashboard failed.", error);
+                    return;
+                }
+
+                SetStatus("Starting controller dashboard...", $"Binding to {dashboardUrl} and using database {RenderFarmLauncher.GetDefaultControllerDatabasePath()}");
+                var launch = RenderFarmLauncher.StartRoleDetailed(settings, captureOutput: true);
+                if (!launch.Started)
+                {
+                    SetStatus("Controller dashboard failed.", launch.ErrorMessage ?? "Controller process could not be started.");
+                    return;
+                }
+
+                activeControllerLaunch = launch;
+                var readiness = await RenderFarmLauncher.WaitForControllerHealthAsync(launch, CancellationToken.None);
+                if (readiness.Succeeded)
+                {
+                    controllerVerified = true;
+                    SetStatus("Controller dashboard ready!", $"Open {launch.DashboardUrl}");
+                    return;
+                }
+
+                controllerVerified = false;
+                SetStatus("Controller dashboard failed.", readiness.Detail);
+                return;
+            }
+
+            SetStatus("Starting worker...", "The worker will appear in the controller dashboard after it heartbeats.");
+            var workerLaunch = RenderFarmLauncher.StartRoleDetailed(settings, captureOutput: false);
+            if (workerLaunch.Started)
+            {
+                SetStatus("Worker start requested.", "Watch the controller dashboard for pending approval, heartbeat, and capability status.");
             }
             else
             {
-                SetStatus($"Start failed with launcher exit code {result}. Confirm this is a published package with controller and worker folders.");
+                SetStatus("Worker start failed.", workerLaunch.ErrorMessage ?? "Worker process could not be started.");
             }
         }
         catch (Exception ex)
         {
             ShowError(ex.Message);
+        }
+        finally
+        {
+            StartRoleButton.IsEnabled = true;
         }
     }
 
@@ -126,22 +171,20 @@ public partial class MainWindow : Window
             var healthUrl = BuildHealthUrl(settings);
             if (healthUrl is null)
             {
-                SetStatus("LAN discovery cannot be verified from the launcher. Enter a Controller URL to check it directly.");
+                SetStatus("Controller URL required.", "LAN discovery cannot be verified from the launcher. Enter a Controller URL to check it directly.");
                 return;
             }
 
-            SetStatus($"Checking {healthUrl} ...");
+            SetStatus("Checking controller...", healthUrl);
             using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
-            using var response = await client.GetAsync(healthUrl);
-            controllerVerified = response.IsSuccessStatusCode;
-            SetStatus(controllerVerified
-                ? $"Controller responded successfully at {healthUrl}."
-                : $"Controller responded with HTTP {(int)response.StatusCode}. Confirm the URL, firewall, and controller state.");
+            var result = await RenderFarmLauncher.CheckControllerHealthAsync(client, healthUrl, CancellationToken.None);
+            controllerVerified = result.Succeeded;
+            SetStatus(result.Succeeded ? "Controller responded successfully." : "Controller check failed.", result.Detail);
         }
         catch (Exception ex)
         {
             controllerVerified = false;
-            SetStatus($"Controller check failed: {ex.Message}");
+            SetStatus("Controller check failed.", ex.Message);
         }
     }
 
@@ -151,11 +194,11 @@ public partial class MainWindow : Window
         {
             var settings = ReadSettingsFromUi();
             var url = settings.Role == "worker" && !string.IsNullOrWhiteSpace(settings.ControllerUrl)
-                ? EnsureTrailingSlash(settings.ControllerUrl)
+                ? RenderFarmLauncher.EnsureTrailingSlash(settings.ControllerUrl)
                 : RenderFarmLauncher.GetDashboardUrl(settings);
 
             Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
-            SetStatus($"Opened {url}");
+            SetStatus("Dashboard opened.", url);
         }
         catch (Exception ex)
         {
@@ -202,7 +245,7 @@ public partial class MainWindow : Window
                 Verb = "runas",
                 WorkingDirectory = AppContext.BaseDirectory
             });
-            SetStatus("Worker service installer requested. Approve the Windows elevation prompt to continue.");
+            SetStatus("Worker service installer requested.", "Approve the Windows elevation prompt to continue.");
         }
         catch (Exception ex)
         {
@@ -217,9 +260,9 @@ public partial class MainWindow : Window
         {
             baseUrl = settings.ControllerUrl;
         }
-        else
+        else if (RenderFarmLauncher.TryBuildDashboardUrl(settings, out var dashboardUrl, out _))
         {
-            baseUrl = RenderFarmLauncher.GetDashboardUrl(settings);
+            baseUrl = dashboardUrl;
         }
 
         if (string.IsNullOrWhiteSpace(baseUrl))
@@ -227,7 +270,7 @@ public partial class MainWindow : Window
             return null;
         }
 
-        return new Uri(new Uri(EnsureTrailingSlash(baseUrl)), "health").ToString();
+        return RenderFarmLauncher.GetHealthUrl(baseUrl);
     }
 
     private static string BuildWorkerServiceArguments(string scriptPath, LauncherSettings settings)
@@ -268,22 +311,16 @@ public partial class MainWindow : Window
         return candidates.Select(Path.GetFullPath).FirstOrDefault(File.Exists);
     }
 
-    private static string EnsureTrailingSlash(string value)
+    private void SetStatus(string headline, string? details = null)
     {
-        var trimmed = value.Trim();
-        if (!trimmed.StartsWith("http://", StringComparison.OrdinalIgnoreCase) && !trimmed.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+        if (StatusHeadlineText is not null)
         {
-            trimmed = "http://" + trimmed;
+            StatusHeadlineText.Text = headline;
         }
 
-        return trimmed.EndsWith("/", StringComparison.Ordinal) ? trimmed : trimmed + "/";
-    }
-
-    private void SetStatus(string message)
-    {
-        if (StatusText is not null)
+        if (StatusDetailsText is not null)
         {
-            StatusText.Text = message;
+            StatusDetailsText.Text = details ?? string.Empty;
         }
     }
 
@@ -301,7 +338,7 @@ public partial class MainWindow : Window
 
     private void ShowError(string message)
     {
-        SetStatus(message);
+        SetStatus("RenderFarm Launcher needs attention.", message);
         MessageBox.Show(this, message, "RenderFarm Launcher", MessageBoxButton.OK, MessageBoxImage.Error);
     }
 }

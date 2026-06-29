@@ -21,7 +21,7 @@ Worker machines also need:
 
 The controller machine also needs:
 
-- A writable location for the SQLite database.
+- A writable per-user location for the SQLite database. By default the controller uses `%LOCALAPPDATA%\RenderFarm\Controller\renderfarm.db`.
 - Firewall rules allowing inbound HTTP from workers when running over LAN.
 
 ## Local Single-PC Smoke Test
@@ -207,7 +207,7 @@ Saved settings live in `%LOCALAPPDATA%\RenderFarm\app-role.json`.
 
 3. Install `dist\RenderFarmSetup-0.1.0-win-x64.exe` on a clean Windows machine.
 
-4. Open **RenderFarm Launcher** from the Start Menu, choose Controller or Worker, save settings, and verify the selected role starts.
+4. Open **RenderFarm Launcher** from the Start Menu, choose Controller or Worker, click **Start selected role**, and verify the selected role starts. Controller mode should report **Controller dashboard ready!** before you open the dashboard.
 ## Worker approval, discovery, and token protection
 
 First-time workers appear as pending in the dashboard. Approve trusted machines before queueing renders.
@@ -229,4 +229,5 @@ If token protection is enabled, start the controller and workers with the same t
 Then enter the token in the dashboard Settings panel for browser actions.
 
 Frame chunking is currently gated. The API can preview deterministic frame chunks, but job execution remains a single normal render until Unreal MRQ/MRG output behavior is proven safe per chunk.
+
 

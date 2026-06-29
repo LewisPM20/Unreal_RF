@@ -72,6 +72,17 @@ public sealed class SqliteRepositorySchemaTests
         Assert.Single(await ((IJobEventRepository)repository).ListForJobAsync(job.Id, CancellationToken.None));
     }
 
+
+    [Fact]
+    public async Task InitializeCreatesConfiguredDatabaseDirectory()
+    {
+        var databasePath = Path.Combine(Path.GetTempPath(), "rf_schema_tests", Guid.NewGuid().ToString("N"), "nested", "renderfarm.db");
+        var repository = new SqliteRenderFarmRepository(Options.Create(new RenderFarmDatabaseOptions { Path = databasePath }));
+
+        await repository.InitializeAsync(CancellationToken.None);
+
+        Assert.True(File.Exists(databasePath), $"Expected SQLite database to be created at {databasePath}");
+    }
     private static SqliteRenderFarmRepository CreateRepository(string databasePath) =>
         new(Options.Create(new RenderFarmDatabaseOptions { ConnectionString = $"Data Source={databasePath}" }));
 

@@ -94,6 +94,13 @@ public sealed class LaunchScriptAssetTests
         Assert.Contains("unreal-search-root", launcherText);
         Assert.Contains("ProjectPathBox", windowText);
         Assert.Contains("SharedOutputRootBox", windowText);
+        Assert.Contains("Start selected role", windowText);
+        Assert.Contains("Open dashboard", windowText);
+        Assert.DoesNotContain("Save settings", windowText);
+        Assert.DoesNotContain("Check controller", windowText);
+        Assert.DoesNotContain("Install worker service", windowText);
+        Assert.Contains("WaitForControllerHealthAsync", launcherText);
+        Assert.Contains("RenderFarm__Database__Path", launcherText);
         Assert.Contains("RenderFarm.Launcher.csproj", publishText);
         Assert.Contains("net8.0-windows", publishText);
         Assert.Contains("framework-dependent", publishText);

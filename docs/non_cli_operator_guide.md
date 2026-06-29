@@ -6,10 +6,10 @@ The active runtime is C#/.NET. Operators do not need Python.
 
 1. Install RenderFarm with the setup EXE or from the package folder.
 2. Open **RenderFarm Launcher** from the Start Menu or desktop shortcut.
-3. Choose **Controller** on the main machine, save settings, then click **Start selected role**.
-4. Click **Open dashboard** to manage workers, projects, render profiles, jobs, logs, and settings.
-5. Choose **Worker** on render machines, enter the controller URL, worker name, Unreal search root, project path, and shared output root, then click **Check controller**.
-6. Start the worker from the launcher, or click **Install worker service** so the worker can run at startup.
+3. Choose **Controller** on the main machine, then click **Start selected role**.
+4. Wait for **Controller dashboard ready!**, then click **Open dashboard** to manage workers, projects, render profiles, jobs, logs, and settings.
+5. Choose **Worker** on render machines, enter the controller URL, worker name, Unreal search root, project path, and shared output root, then click **Start selected role**.
+6. Use the elevated worker-service script only when the worker should run at startup.
 
 ## Creating a Package
 
@@ -68,7 +68,7 @@ Worker example:
 
 - Windows 10/11.
 - .NET 8 Desktop Runtime, unless using the setup EXE with bundled runtime.
-- Writable folder for the SQLite database.
+- The controller SQLite database is stored under `%LOCALAPPDATA%\RenderFarm\Controller\renderfarm.db` by default.
 - Firewall inbound rule for controller port, normally `9200`, when workers are on other PCs.
 - Optional API token if the farm should reject unauthenticated write actions.
 
@@ -83,7 +83,7 @@ Worker example:
 
 ## Worker Service
 
-The launcher can start the elevated worker-service installer after a controller health check. Manual service setup is still available:
+The visible launcher keeps service setup hidden for now. Worker service setup is still available from an elevated PowerShell session:
 
 ```powershell
 & "$env:LOCALAPPDATA\RenderFarm\Product\installer\install_worker_service.ps1" `

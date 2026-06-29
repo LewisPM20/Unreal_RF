@@ -12,9 +12,51 @@ namespace RenderFarm.Persistence;
 public sealed class RenderFarmDatabaseOptions
 {
     /// <summary>
-    /// SQLite connection string. Defaults to renderfarm.db beside the running process.
+    /// Optional SQLite connection string. When supplied, it takes precedence over <see cref="Path"/>.
     /// </summary>
-    public string ConnectionString { get; set; } = "Data Source=renderfarm.db";
+    public string? ConnectionString { get; set; }
+
+    /// <summary>
+    /// Optional SQLite database file path. Environment variables are expanded before use.
+    /// </summary>
+    public string? Path { get; set; }
+
+    /// <summary>
+    /// Builds the SQLite connection string used by the controller.
+    /// </summary>
+    public string ResolveConnectionString()
+    {
+        if (!string.IsNullOrWhiteSpace(ConnectionString))
+        {
+            return ConnectionString;
+        }
+
+        var databasePath = string.IsNullOrWhiteSpace(Path) ? GetDefaultDatabasePath() : ExpandConfiguredPath(Path);
+        return new SqliteConnectionStringBuilder
+        {
+            DataSource = databasePath,
+            Mode = SqliteOpenMode.ReadWriteCreate
+        }.ToString();
+    }
+
+    /// <summary>
+    /// Returns the default per-user controller database path.
+    /// </summary>
+    public static string GetDefaultDatabasePath()
+    {
+        var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        var root = string.IsNullOrWhiteSpace(localAppData)
+            ? System.IO.Path.Combine(AppContext.BaseDirectory, "data")
+            : System.IO.Path.Combine(localAppData, "RenderFarm", "Controller");
+
+        return System.IO.Path.Combine(root, "renderfarm.db");
+    }
+
+    private static string ExpandConfiguredPath(string value)
+    {
+        var expanded = Environment.ExpandEnvironmentVariables(value.Trim());
+        return System.IO.Path.IsPathFullyQualified(expanded) ? expanded : System.IO.Path.GetFullPath(expanded);
+    }
 }
 
 public sealed record MaintenanceClearResult(
@@ -117,7 +159,7 @@ public sealed class SqliteRenderFarmRepository(IOptions<RenderFarmDatabaseOption
     ISchedulerStateRepository
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
-    private readonly string _connectionString = options.Value.ConnectionString;
+    private readonly string _connectionString = options.Value.ResolveConnectionString();
 
     public async Task InitializeAsync(CancellationToken cancellationToken)
     {
@@ -539,20 +581,50 @@ public sealed class SqliteRenderFarmRepository(IOptions<RenderFarmDatabaseOption
 
     private async Task<SqliteConnection> OpenConnectionAsync(CancellationToken cancellationToken)
     {
+        EnsureDatabaseDirectory(_connectionString);
         var connection = new SqliteConnection(_connectionString);
         await connection.OpenAsync(cancellationToken);
         await ConfigureConnectionAsync(connection, cancellationToken);
         return connection;
     }
 
+    private static void EnsureDatabaseDirectory(string connectionString)
+    {
+        var builder = new SqliteConnectionStringBuilder(connectionString);
+        var dataSource = builder.DataSource;
+        if (string.IsNullOrWhiteSpace(dataSource) ||
+            dataSource.Equals(":memory:", StringComparison.OrdinalIgnoreCase) ||
+            dataSource.StartsWith("file:", StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        var fullPath = System.IO.Path.GetFullPath(Environment.ExpandEnvironmentVariables(dataSource));
+        var directory = System.IO.Path.GetDirectoryName(fullPath);
+        if (!string.IsNullOrWhiteSpace(directory))
+        {
+            Directory.CreateDirectory(directory);
+        }
+    }
+
     private static async Task ConfigureConnectionAsync(SqliteConnection connection, CancellationToken cancellationToken)
     {
+        await ExecutePragmaAsync(connection, "PRAGMA foreign_keys = ON;", cancellationToken);
+        await ExecutePragmaAsync(connection, "PRAGMA busy_timeout = 5000;", cancellationToken);
+        try
+        {
+            await ExecutePragmaAsync(connection, "PRAGMA journal_mode = WAL;", cancellationToken);
+        }
+        catch (SqliteException)
+        {
+            await ExecutePragmaAsync(connection, "PRAGMA journal_mode = DELETE;", cancellationToken);
+        }
+    }
+
+    private static async Task ExecutePragmaAsync(SqliteConnection connection, string sql, CancellationToken cancellationToken)
+    {
         await using var command = connection.CreateCommand();
-        command.CommandText = """
-            PRAGMA foreign_keys = ON;
-            PRAGMA journal_mode = WAL;
-            PRAGMA busy_timeout = 5000;
-            """;
+        command.CommandText = sql;
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
@@ -686,3 +758,5 @@ public sealed class SqliteRenderFarmRepository(IOptions<RenderFarmDatabaseOption
         return reader.IsDBNull(ordinal) ? null : reader.GetInt32(ordinal);
     }
 }
+
+

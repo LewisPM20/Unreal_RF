@@ -9,4 +9,9 @@
     <ProjectReference Include="..\RenderFarm.Shared\RenderFarm.Shared.csproj" />
     <ProjectReference Include="..\RenderFarm.Persistence\RenderFarm.Persistence.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <Content Remove="*.db;*.db-shm;*.db-wal" />
+    <None Remove="*.db;*.db-shm;*.db-wal" />
+  </ItemGroup>
 </Project>
+

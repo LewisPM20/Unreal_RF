@@ -16,7 +16,7 @@ Python is not part of the product runtime except optional Unreal bridge scripts 
 
 Use a small framework-dependent Windows package plus a branded Inno Setup setup EXE.
 
-The runtime remains split into Controller and Worker executables because they have different machine responsibilities. The WPF launcher is the operator-friendly front door and the installer shortcut target.
+The runtime remains split into Controller and Worker executables because they have different machine responsibilities. A single role-selecting launcher is the operator-friendly front door and the installer shortcut target.
 
 This keeps distribution practical:
 
@@ -41,8 +41,8 @@ Product/package mode:
 - Controller mode stores host, port, and optional API token, then can start the controller and open the dashboard.
 - Worker mode stores controller URL, optional LAN discovery, API token, worker ID/display name, Unreal search root, project path, and shared output root.
 - Launcher settings are stored in `%LOCALAPPDATA%\RenderFarm\app-role.json`.
-- The launcher can check controller `/health` before service setup.
-- Worker service install is available from the launcher after package install, with an elevation prompt.
+- Controller startup from the launcher waits for `/health` before reporting the dashboard ready.
+- Worker service install is available through the elevated `install_worker_service.ps1` script after the controller URL is known.
 - `scripts/publish_apps.ps1`: publishes controller, worker, and launcher into `publish/RenderFarm`.
 - `scripts/build_installer.ps1`: publishes framework-dependent `win-x64` output and compiles the Inno Setup script with `ISCC.exe`.
 - `installer/RenderFarm.iss`: setup EXE definition, Start Menu shortcut, optional Desktop shortcut, runtime check, and bundled runtime install step.
@@ -60,11 +60,11 @@ Product/package mode:
 1. The setup EXE or package folder deploys RenderFarm binaries and creates launcher entrypoints.
 2. First run opens the native launcher UI.
 3. User chooses Controller or Worker.
-4. Controller mode explains the role and stores dashboard host/port/token settings.
-5. Worker mode asks for controller URL or discovery, token, worker name, Unreal root, project path, and shared output root.
-6. Choice is stored in per-user settings under `%LOCALAPPDATA%`.
-7. User can change role later by reopening the launcher and saving a different role.
-8. Worker can be installed as a Windows Service from the launcher or elevated script after controller health is checked.
+4. Controller mode stores dashboard host/port/token settings and starts the dashboard.
+5. The launcher waits for controller `/health` before reporting that the dashboard is ready.
+6. Worker mode asks for controller URL or discovery, token, worker name, Unreal root, project path, and shared output root.
+7. Choice is stored internally in per-user settings under `%LOCALAPPDATA%`.
+8. Worker can be installed as a Windows Service with the elevated script after the controller URL is known.
 
 ## Build a lightweight package
 
@@ -105,6 +105,10 @@ The build script reports the exact published package size and setup EXE size. Wi
 
 The installed launcher, Start Menu shortcut, desktop shortcut, and uninstall entry use the RenderFarm product icon from packaging\\assets\\renderfarm.ico. The setup-window icon can also use that icon by passing -UseSetupIcon; the default build keeps the setup-window icon conservative because some local security tools reject custom setup resource updates.
 
+## Controller database location
+
+The controller stores its SQLite database under `%LOCALAPPDATA%\RenderFarm\Controller\renderfarm.db` by default. This keeps installed packages under Program Files read-only while allowing the controller to initialize automatically.
+
 ## Runtime requirement
 
 RenderFarm includes a WPF launcher, so target machines need the Microsoft .NET 8 Desktop Runtime. The setup EXE checks for `Microsoft.WindowsDesktop.App` version 8 or newer. If it is missing and the redistributable is bundled, setup launches it silently with:
@@ -115,9 +119,9 @@ RenderFarm includes a WPF launcher, so target machines need the Microsoft .NET 8
 
 ## Worker service flow
 
-After installing the product on a worker PC, use the launcher in Worker mode and click `Check controller`, then `Install worker service`.
+After installing the product on a worker PC, use the launcher in Worker mode to confirm the controller URL and worker settings. The service installer is intentionally kept as an elevated script for now.
 
-The manual elevated path is:
+The elevated path is:
 
 ```powershell
 & "$env:LOCALAPPDATA\RenderFarm\Product\installer\install_worker_service.ps1" `
@@ -142,11 +146,11 @@ Remove the service:
 2. Install it on a clean Windows 10/11 machine.
 3. Confirm Start Menu contains **RenderFarm Launcher**.
 4. Start RenderFarm Launcher.
-5. Choose **Controller**, save settings, start controller, and open `http://127.0.0.1:9200/`.
-6. Confirm the dashboard loads and `/health` returns OK.
+5. Choose **Controller**, click **Start selected role**, and wait for `Controller dashboard ready!`.
+6. Click **Open dashboard** and confirm `/health` returns OK.
 7. If using LAN workers, run the firewall helper from elevated PowerShell with `-Accept`.
-8. On a worker machine, choose **Worker**, enter the controller URL, save settings, and check controller.
-9. Start the worker or install it as a service.
+8. On a worker machine, choose **Worker**, enter the controller URL, and click **Start selected role**.
+9. Optionally install the worker as a service using the elevated script.
 10. Approve the worker in the dashboard and confirm heartbeat/capabilities appear.
 11. Uninstall from Windows Apps and confirm `%LOCALAPPDATA%\RenderFarm\app-role.json` remains unless intentionally removed.
 
@@ -168,7 +172,7 @@ Package mode:
 1. Run `.\scripts\publish_apps.ps1 -Configuration Release -Runtime win-x64 -Mode framework-dependent`.
 2. Run `.\publish\RenderFarm\RenderFarm.Launcher.exe --show-config`.
 3. Run `.\publish\RenderFarm\RenderFarm.Launcher.exe --role controller --save --host 127.0.0.1 --port 9200`.
-4. Run `.\publish\RenderFarm\RenderFarm.Launcher.exe` and confirm the launcher UI opens with saved controller settings.
+4. Run `.\publish\RenderFarm\RenderFarm.Launcher.exe` and confirm the launcher UI opens with saved controller settings and the two action buttons.
 5. Install to local app data with `.\publish\RenderFarm\installer\install_renderfarm.ps1 -Role controller -CreateShortcuts`.
 
 Installer mode:
@@ -177,7 +181,7 @@ Installer mode:
 2. Run `.\scripts\build_installer.ps1 -Configuration Release -Runtime win-x64 -ProductVersion 0.1.0`.
 3. Install `dist\RenderFarmSetup-0.1.0-win-x64.exe` on a clean Windows machine.
 4. Open RenderFarm Launcher from Start Menu.
-5. Choose Controller or Worker and save settings.
+5. Choose Controller or Worker, click **Start selected role**, and confirm the launcher reports readiness or a clear failure reason.
 
 ## TODOs
 
@@ -185,3 +189,7 @@ Installer mode:
 - Add richer launcher controls for multiple project paths, shared output roots, Unreal roots, and API token rotation.
 - Add optional installer page text for controller firewall setup once the product wording is final.
 - Add screenshot-based clean-machine release evidence.
+
+
+
+

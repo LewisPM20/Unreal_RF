@@ -1,7 +1,7 @@
 {
   "RenderFarm": {
     "Database": {
-      "Path": "data/renderfarm.db"
+      "Path": "%LOCALAPPDATA%\\RenderFarm\\Controller\\renderfarm.db"
     },
     "Scheduler": {
       "LeaseSeconds": 120,
@@ -32,3 +32,4 @@
     }
   }
 }
+

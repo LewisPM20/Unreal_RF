@@ -40,7 +40,18 @@ builder.Services.Configure<GzipCompressionProviderOptions>(options => options.Le
 builder.Services.AddHostedService<ControllerStartupRecoveryService>();
 
 var app = builder.Build();
-await app.Services.GetRequiredService<IRenderFarmDatabase>().InitializeAsync(app.Lifetime.ApplicationStopping);
+try
+{
+    await app.Services.GetRequiredService<IRenderFarmDatabase>().InitializeAsync(app.Lifetime.ApplicationStopping);
+}
+catch (Exception ex)
+{
+    Console.Error.WriteLine("RenderFarm controller failed to initialize its SQLite database.");
+    Console.Error.WriteLine("Check that the configured RenderFarm:Database:Path directory exists or can be created by this Windows user.");
+    Console.Error.WriteLine(ex);
+    Environment.ExitCode = 1;
+    return;
+}
 
 app.UseResponseCompression();
 app.UseDefaultFiles();
@@ -55,3 +66,4 @@ app.MapJobEndpoints();
 app.MapSettingsEndpoints();
 
 app.Run();
+

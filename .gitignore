@@ -399,3 +399,15 @@ FodyWeavers.xsd
 
 # JetBrains Rider
 *.sln.iml
+
+# Local SQLite databases
+*.db
+*.db-shm
+*.db-wal
+
+
+# RenderFarm local package verification outputs
+_publish_*/
+_installer_publish_*/
+_installer_dist_*/
+dist/
