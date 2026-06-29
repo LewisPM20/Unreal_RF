@@ -1,0 +1,103 @@
+{
+  "token": "dev-token-change-me",
+  "workers": [
+    {
+      "id": "render-pc-b",
+      "name": "Render PC B",
+      "url": "http://192.168.1.50:9100",
+      "token": "dev-token-change-me"
+    },
+    {
+      "id": "render-pc-c",
+      "name": "Render PC C",
+      "url": "http://192.168.1.51:9100",
+      "token": "dev-token-change-me"
+    }
+  ],
+  "projects": [
+    {
+      "id": "dhl_walkway",
+      "name": "DHL Walkway",
+      "maps": [
+        {
+          "id": "v2",
+          "name": "Walkway V2",
+          "path": "/Game/C4D_FOR_UNREAL/V2"
+        }
+      ],
+      "sequences": [
+        {
+          "id": "walk_closerstart_v9",
+          "name": "WALK CLOSERSTART V9",
+          "path": "/Game/Sequences/WALK_CLOSERSTART_V9.WALK_CLOSERSTART_V9"
+        }
+      ],
+      "presets": [
+        {
+          "id": "my_render_queue",
+          "name": "My Render Queue - Image Sequence",
+          "path": "/Game/Cinematics/myRenderQueue",
+          "notes": "Saved MRQ queue asset. Set the output folder inside Unreal before submitting. RenderFarm changes the filename only.",
+          "map": "Minimal_Default1"
+        },
+        {
+          "id": "my_video_queue",
+          "name": "My Render Queue - Video",
+          "path": "/Game/Cinematics/myVideoQueue",
+          "notes": "Saved MRQ queue asset for MP4/MOV output. Do not use frame chunking for video jobs.",
+          "map": "Minimal_Default1"
+        }
+      ],
+      "worker_paths": {
+        "render-pc-b": {
+          "engine_path": "C:/Program Files/Epic Games/UE_5.7/Engine/Binaries/Win64/UnrealEditor-Cmd.exe",
+          "project_path": "D:/DHL_NEW/walkwayV5/DHLPractise.uproject",
+          "output_scan_root": "D:/RenderFarmOutput",
+          "log_dir": "worker_logs"
+        },
+        "render-pc-c": {
+          "engine_path": "C:/Program Files/Epic Games/UE_5.7/Engine/Binaries/Win64/UnrealEditor-Cmd.exe",
+          "project_path": "D:/DHL_NEW/walkwayV5/DHLPractise.uproject",
+          "output_scan_root": "D:/RenderFarmOutput",
+          "log_dir": "worker_logs"
+        }
+      },
+      "preferred_engine_version": "5.8",
+      "allowed_engine_versions": [
+        "5.8",
+        "5.7"
+      ],
+      "shared_output_subfolder": "dhl_walkway",
+      "render_profiles": [
+        {
+          "id": "my_render_queue",
+          "name": "My Render Queue - Image Sequence",
+          "type": "mrq_queue",
+          "asset_path": "/Game/Cinematics/myRenderQueue",
+          "default_output_type": "image_sequence",
+          "supports_chunking": true,
+          "notes": "Saved MRQ queue asset. Set the output folder inside Unreal before submitting. RenderFarm changes the filename only.",
+          "map": "Minimal_Default1",
+          "extra_args": ""
+        },
+        {
+          "id": "my_video_queue",
+          "name": "My Render Queue - Video",
+          "type": "mrq_queue",
+          "asset_path": "/Game/Cinematics/myVideoQueue",
+          "default_output_type": "video_file",
+          "supports_chunking": false,
+          "notes": "Saved MRQ queue asset for MP4/MOV output. Do not use frame chunking for video jobs.",
+          "map": "Minimal_Default1",
+          "extra_args": ""
+        }
+      ],
+      "default_map": "Minimal_Default1"
+    }
+  ],
+  "shared_output_root": "\\\\RenderNAS\\UnrealRenders",
+  "output_policy": {
+    "mode": "shared_folder_and_filename",
+    "overwrite_existing": false
+  }
+}

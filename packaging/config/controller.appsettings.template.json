@@ -1,0 +1,34 @@
+{
+  "RenderFarm": {
+    "Database": {
+      "Path": "data/renderfarm.db"
+    },
+    "Scheduler": {
+      "LeaseSeconds": 120,
+      "MaxAttempts": 3,
+      "RetryDelaySeconds": 0,
+      "RetryBackoffMultiplier": 1
+    },
+    "Discovery": {
+      "Enabled": false,
+      "Port": 39200,
+      "ControllerUrl": "http://CONTROLLER_IP:9200"
+    },
+    "Security": {
+      "ApiToken": ""
+    },
+    "Notifications": {
+      "Enabled": false,
+      "WebhookUrl": "",
+      "NotifyOnSucceeded": true,
+      "NotifyOnFailed": true,
+      "NotifyOnCancelled": true
+    }
+  },
+  "Logging": {
+    "LogLevel": {
+      "Default": "Information",
+      "Microsoft.AspNetCore": "Warning"
+    }
+  }
+}

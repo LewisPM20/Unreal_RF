@@ -1,0 +1,21 @@
+Phase 9.1 features retained:
+- Video extension detection.
+- Image sequence output counting.
+- Expected output counting.
+- Frame chunking for image sequences.
+- Chunking disabled for video output.
+- Controller dashboard.
+- Worker MRQ preparation/render path.
+
+Phase 10 features added:
+- SQLite schema bootstrap and job mirroring.
+- Registered worker heartbeat endpoint.
+- Worker capability reporting.
+- Optional worker heartbeat loop to controller.
+- Shared output root and output policy in config example.
+- Worker shared output write validation.
+- Controller shared output preflight before render dispatch.
+- Project/render profile docs and config aliases.
+- C#/.NET skeleton for future takeover.
+- Codex guidance docs.
+- Batch launchers moved to legacy_batch/.

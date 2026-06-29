@@ -1,0 +1,317 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RenderFarm Controller</title>
+  <link rel="stylesheet" href="/css/app.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="Dashboard sections">
+      <div class="brand">
+        <span class="brand-mark">RF</span>
+        <div>
+          <strong>RenderFarm Controller</strong>
+          <span>Controller node</span>
+        </div>
+      </div>
+      <nav class="nav-tabs" aria-label="Primary">
+        <button class="nav-tab active" data-view="overview" type="button">Overview</button>
+        <button class="nav-tab" data-view="workers" type="button">Workers</button>
+        <button class="nav-tab" data-view="projects" type="button">Projects</button>
+        <button class="nav-tab" data-view="queue" type="button">Queue</button>
+        <button class="nav-tab" data-view="create" type="button">Create</button>
+        <button class="nav-tab" data-view="settings" type="button">Settings</button>
+      </nav>
+      <div class="sidebar-card">
+        <span class="live-dot"></span>
+        <div>
+          <strong id="navStatus">Checking</strong>
+          <span id="navUpdated">Controller handshake pending</span>
+        </div>
+      </div>
+    </aside>
+
+    <main class="content">
+      <header class="page-header">
+        <div>
+          <p class="eyebrow">Unreal render operations</p>
+          <h1>RenderFarm Controller</h1>
+          <p id="controllerVersion" class="subtle">Connecting to controller...</p>
+        </div>
+        <div class="header-actions">
+          <label class="search">
+            <span>Search</span>
+            <input id="searchBox" type="search" placeholder="Search farm activity">
+          </label>
+          <select id="statusFilter" aria-label="Worker status filter">
+            <option value="">All workers</option>
+            <option value="pending">Pending</option>
+            <option value="idle">Idle</option>
+            <option value="busy">Busy</option>
+            <option value="stale">Stale</option>
+            <option value="offline">Offline</option>
+            <option value="error">Error</option>
+          </select>
+          <button id="refreshBtn" class="button primary" type="button">Refresh</button>
+        </div>
+      </header>
+
+      <div id="errorBanner" class="error-banner hidden"></div>
+
+      <section class="view active" data-panel="overview">
+        <div id="summaryCards" class="summary-grid"></div>
+        <div class="dashboard-grid">
+          <section class="panel wide">
+            <div class="panel-head">
+              <div>
+                <h2>Operations Overview</h2>
+                <p>Live controller health, queue load, and worker readiness.</p>
+              </div>
+            </div>
+            <div id="healthTimeline" class="health-rail"></div>
+          </section>
+          <section class="panel">
+            <div class="panel-head">
+              <div>
+                <h2>Shared Output Roots</h2>
+                <p>Validated shared roots reported by active workers.</p>
+              </div>
+            </div>
+            <div id="outputs" class="stack"></div>
+          </section>
+          <section class="panel">
+            <div class="panel-head">
+              <div>
+                <h2>Pending Worker Approval</h2>
+                <p>Approve trusted machines before they can receive work.</p>
+              </div>
+            </div>
+            <div id="pendingWorkers" class="stack"></div>
+          </section>
+        </div>
+      </section>
+
+      <section class="view" data-panel="workers">
+        <section class="panel">
+          <div class="panel-head">
+            <div>
+              <h2>Registered Workers</h2>
+              <p>Worker health, capabilities, approval state, and current assignment.</p>
+            </div>
+            <button id="rescanWorkersBtn" class="button" type="button">Rescan workers</button>
+          </div>
+          <div id="workers" class="worker-grid"></div>
+        </section>
+      </section>
+
+      <section class="view" data-panel="projects">
+        <div class="dashboard-grid">
+          <section class="panel">
+            <div class="panel-head">
+              <div>
+                <h2>Projects</h2>
+                <p>Production projects with per-machine Unreal paths.</p>
+              </div>
+            </div>
+            <div id="projects" class="stack"></div>
+          </section>
+          <section class="panel">
+            <div class="panel-head">
+              <div>
+                <h2>Render Profiles</h2>
+                <p>Reusable render definitions for each project.</p>
+              </div>
+            </div>
+            <div id="profiles" class="stack"></div>
+          </section>
+        </div>
+      </section>
+
+      <section class="view" data-panel="queue">
+        <section class="panel">
+          <div class="panel-head">
+            <div>
+              <h2>Jobs</h2>
+              <p>Every scheduled render and its current lifecycle state.</p>
+            </div>
+            <div class="inline-actions">
+              <button id="expireBtn" class="button" type="button">Recover stale leases</button>
+              <button id="clearJobsBtn" class="button danger" type="button">Clear queue history</button>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>State</th>
+                  <th>Project</th>
+                  <th>Profile</th>
+                  <th>Worker</th>
+                  <th>Attempts</th>
+                  <th>Failure</th>
+                  <th>Updated</th>
+                </tr>
+              </thead>
+              <tbody id="jobs"></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+
+      <section class="view" data-panel="create">
+        <div class="dashboard-grid">
+          <section class="panel">
+            <div class="panel-head"><div><h2>Register Project</h2><p>Populate machine-specific paths from approved worker telemetry.</p></div></div>
+            <form id="projectForm" class="form-grid">
+              <label>Project ID<input name="id" placeholder="project-id" required></label>
+              <label>Name<input name="displayName" placeholder="Project display name" required></label>
+              <label class="full">.uproject path<input name="uProjectPath" list="projectPathList" placeholder="Absolute path to .uproject"></label>
+              <label>Preferred UE version<input name="preferredEngineVersion" list="engineVersionList" placeholder="5.7"></label>
+              <label>Allowed versions<input name="allowedEngineVersions" list="engineVersionList" placeholder="5.7, 5.6"></label>
+              <label>Worker ID<input name="workerId" list="workerIdList" placeholder="Worker ID from heartbeat"></label>
+              <label>Worker engine root<input name="enginePath" list="engineRootList" placeholder="Unreal Engine root path"></label>
+              <label class="full">Worker project path<input name="workerProjectPath" list="projectPathList" placeholder="Absolute path to .uproject"></label>
+              <label class="full">Log directory<input name="logDirectory" list="outputRootList" placeholder="Worker log directory"></label>
+              <div class="full inline-actions">
+                <button class="button primary" type="submit">Save project</button>
+                <button id="fillWorkerBtn" class="button" type="button">Fill from worker heartbeat</button>
+              </div>
+            </form>
+          </section>
+
+          <section class="panel">
+            <div class="panel-head"><div><h2>Create Render Profile</h2><p>Store repeatable Unreal launch settings for queueable renders.</p></div></div>
+            <form id="profileForm" class="form-grid">
+              <label>Profile ID<input name="id" placeholder="profile-id" required></label>
+              <label>Project<select name="projectId" required></select></label>
+              <label>Name<input name="displayName" placeholder="Profile display name" required></label>
+              <label>Type<select name="type"><option value="MrqQueue">MRQ Queue</option><option value="MrgGraph">MRG Graph</option><option value="CommandTemplate">Command Template</option><option value="Manual">Manual</option></select></label>
+              <label>Map / level argument<input name="mapName" placeholder="Map or level argument"></label>
+              <label>MRQ config asset<input name="assetPath" placeholder="/Game/.../MoviePipelineQueueConfig"></label>
+              <label class="full">Extra Unreal args<input name="extraArgs" placeholder="Additional Unreal command arguments"></label>
+              <label>Minimum CPU cores<input name="minCpuCores" type="number" min="1" placeholder="Optional"></label>
+              <label>Minimum RAM (GB)<input name="minRamGb" type="number" min="0" step="0.1" placeholder="Optional"></label>
+              <label>Minimum VRAM (GB)<input name="minVramGb" type="number" min="0" step="0.1" placeholder="Optional"></label>
+              <label>GPU name contains<input name="gpuNameContains" placeholder="RTX 4090, RTX, Quadro"></label>
+              <label class="full">Command template<textarea name="commandTemplate" rows="3" placeholder="{project} {map} -game -MoviePipelineConfig={asset} -windowed -Log -StdOut -Unattended"></textarea></label>
+              <div class="full"><button class="button primary" type="submit">Save profile</button></div>
+            </form>
+          </section>
+
+          <section class="panel wide">
+            <div class="panel-head"><div><h2>Create Profile From Scan</h2><p>Scan a project, choose discovered assets, and save a reusable render profile.</p></div></div>
+            <div class="form-grid">
+              <label>Project<select id="scanProjectSelect" name="projectId"></select></label>
+              <label>Profile ID<input id="scanProfileId" placeholder="profile-from-scan"></label>
+              <label>Name<input id="scanProfileName" placeholder="Profile display name"></label>
+              <label>Profile type<select id="scanProfileType"><option value="MrqQueue">MRQ Queue</option><option value="MrgGraph">MRG Graph</option><option value="Manual">Manual</option></select></label>
+              <label>Map<select id="scanMapSelect"></select></label>
+              <label>Render asset<select id="scanAssetSelect"></select></label>
+              <div id="scanResults" class="full scan-results empty">No project scan has been run in this session.</div>
+              <div class="full inline-actions">
+                <button id="scanSelectedProjectBtn" class="button" type="button">Scan selected project</button>
+                <button id="createProfileFromScanBtn" class="button primary" type="button">Create render profile from scan</button>
+              </div>
+            </div>
+          </section>
+
+          <section class="panel wide">
+            <div class="panel-head"><div><h2>Queue Render</h2><p>Schedule a render using a registered project and profile.</p></div></div>
+            <form id="jobForm" class="form-grid">
+              <label>Name<input name="name" placeholder="Shot, sequence, or delivery name" required></label>
+              <label>Priority<input name="priority" type="number" value="0"></label>
+              <label>Project<select name="projectId" required></select></label>
+              <label>Render profile<select name="renderProfileId" required></select></label>
+              <label class="full">Output directory<input name="outputDirectory" list="outputRootList" placeholder="Shared output folder for this render"></label>
+              <label>Frame start<input name="frameStart" type="number" placeholder="Preview only"></label>
+              <label>Frame end<input name="frameEnd" type="number" placeholder="Preview only"></label>
+              <label>Chunk size<input name="chunkSizeFrames" type="number" min="1" placeholder="Preview only"></label>
+              <div class="full inline-actions">
+                <button id="previewChunksBtn" class="button" type="button">Preview chunks</button>
+                <button class="button primary" type="submit">Queue job</button>
+              </div>
+              <div class="full callout">Chunk preview is a dry run only. Queueing still creates one normal render job and distributed chunk execution remains disabled.</div>
+              <div id="chunkPreview" class="full chunk-preview empty">Enter a frame range to preview deterministic chunks.</div>
+            </form>
+          </section>
+        </div>
+      </section>
+
+      <section class="view" data-panel="settings">
+        <div class="dashboard-grid">
+          <section class="panel">
+            <div class="panel-head"><div><h2>Controller API Token</h2><p>Used by this browser for protected controller actions when token protection is enabled.</p></div></div>
+            <div class="form-grid">
+              <label class="full">Bearer token<input id="apiTokenInput" type="password" autocomplete="off" placeholder="Leave blank for open local development"></label>
+              <div class="full inline-actions">
+                <button id="saveApiTokenBtn" class="button primary" type="button">Save token in this browser</button>
+                <button id="clearApiTokenBtn" class="button" type="button">Clear token</button>
+              </div>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-head"><div><h2>Import Farm Configuration</h2><p>Load projects and profiles from a reviewed JSON configuration file.</p></div></div>
+            <div class="form-grid">
+              <label class="full">Select farm config file<input id="configFile" type="file" accept=".json,application/json"></label>
+              <label class="full">Or paste config JSON<textarea id="configText" rows="8" placeholder="Paste validated farm configuration JSON"></textarea></label>
+              <div class="full inline-actions">
+                <button id="importConfigBtn" class="button primary" type="button">Import projects and profiles</button>
+                <button id="clearConfigBtn" class="button" type="button">Clear import text</button>
+              </div>
+            </div>
+          </section>
+          <section class="panel">
+            <div class="panel-head"><div><h2>Maintenance</h2><p>Controlled maintenance actions for the controller database.</p></div></div>
+            <div class="stack">
+              <div class="callout danger-soft">Full reset clears workers, projects, profiles, jobs, events, leases, and settings.</div>
+              <button id="resetStateBtn" class="button danger" type="button">Reset controller database</button>
+            </div>
+          </section>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <datalist id="workerIdList"></datalist>
+  <datalist id="engineRootList"></datalist>
+  <datalist id="engineVersionList"></datalist>
+  <datalist id="projectPathList"></datalist>
+  <datalist id="outputRootList"></datalist>
+  <div id="jobDrawerBackdrop" class="drawer-backdrop hidden" data-close-job-drawer></div>
+  <aside id="jobDrawer" class="job-drawer hidden" aria-hidden="true" aria-label="Job details">
+    <div class="drawer-head">
+      <div>
+        <p class="eyebrow">Job details</p>
+        <h2 id="jobDrawerTitle">Selected render</h2>
+        <p id="jobDrawerMeta" class="subtle"></p>
+      </div>
+      <button id="closeJobDrawer" class="button" type="button" data-close-job-drawer>Close</button>
+    </div>
+    <div class="drawer-body">
+      <section class="detail-section">
+        <h3>Status</h3>
+        <div id="jobDrawerSummary" class="detail-grid"></div>
+      </section>
+      <section class="detail-section">
+        <h3>Artifacts</h3>
+        <div id="jobDrawerArtifacts" class="stack compact"></div>
+      </section>
+      <section class="detail-section">
+        <h3>Attempts</h3>
+        <div id="jobDrawerAttempts" class="stack compact"></div>
+      </section>
+      <section class="detail-section">
+        <h3>Events</h3>
+        <div id="jobDrawerEvents" class="event-list"></div>
+      </section>
+    </div>
+  </aside>
+  <div id="toast" class="toast"></div>
+
+  <script type="module" src="/js/dashboard.js"></script>
+</body>
+</html>

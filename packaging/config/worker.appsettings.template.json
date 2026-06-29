@@ -1,0 +1,32 @@
+{
+  "RenderFarm": {
+    "ControllerUrl": "http://CONTROLLER_IP:9200",
+    "ApiToken": "",
+    "WorkerId": "",
+    "DisplayName": "",
+    "DiscoveryEnabled": false,
+    "DiscoverySeconds": 5,
+    "DiscoveryPort": 39200,
+    "ServiceUrl": "http://127.0.0.1:9100",
+    "HeartbeatSeconds": 5,
+    "JobPollingSeconds": 5,
+    "LeaseRenewalSeconds": 30,
+    "RenderTimeoutSeconds": 0,
+    "ProjectPaths": [
+      "D:\\Projects\\Example\\Example.uproject"
+    ],
+    "SharedOutputRoots": [
+      "\\\\SERVER\\RenderFarmOutput"
+    ],
+    "UnrealSearchRoots": [
+      "C:\\Program Files\\Epic Games"
+    ],
+    "AttemptLogRoot": "logs\\attempts",
+    "WorkerStateFilePath": "state\\worker-current-job.json"
+  },
+  "Logging": {
+    "LogLevel": {
+      "Default": "Information"
+    }
+  }
+}

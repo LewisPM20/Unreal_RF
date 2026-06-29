@@ -1,0 +1,5 @@
+<Project>
+  <Target Name="VSTest" Condition="'$(IsTestProject)' != 'true'">
+    <Message Text="Skipping VSTest for non-test project $(MSBuildProjectName)." Importance="Low" />
+  </Target>
+</Project>

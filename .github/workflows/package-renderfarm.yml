@@ -1,0 +1,48 @@
+name: package-renderfarm
+
+on:
+  workflow_dispatch:
+    inputs:
+      product_version:
+        description: RenderFarm setup version, major.minor.patch
+        required: true
+        default: 0.1.0
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  package:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Restore
+        run: dotnet restore .\RenderFarm.sln
+
+      - name: Build
+        run: dotnet build .\RenderFarm.sln -c Release --no-restore
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup --yes --no-progress
+
+      - name: Build setup package
+        shell: pwsh
+        env:
+          PRODUCT_VERSION: ${{ github.event.inputs.product_version || '0.1.0' }}
+        run: .\scripts\build_installer.ps1 -Configuration Release -Runtime win-x64 -ProductVersion $env:PRODUCT_VERSION -Zip -AllowMissingRuntimeInstaller
+
+      - name: Upload package artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: renderfarm-windows-package
+          path: |
+            publish\RenderFarm-win-x64-Release.zip
+            dist\RenderFarmSetup-*-win-x64.exe

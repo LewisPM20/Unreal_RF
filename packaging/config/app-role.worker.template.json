@@ -1,0 +1,16 @@
+{
+  "role": "worker",
+  "hostName": "127.0.0.1",
+  "port": 9200,
+  "controllerUrl": "http://CONTROLLER_IP:9200",
+  "discoveryEnabled": false,
+  "discoverySeconds": 5,
+  "discoveryPort": 39200,
+  "workerId": "worker-pc-01",
+  "displayName": "Render Worker 01",
+  "apiToken": "",
+  "unrealSearchRoot": "C:\\Program Files\\Epic Games",
+  "projectPath": "D:\\Projects\\Example\\Example.uproject",
+  "sharedOutputRoot": "\\\\SERVER\\RenderFarmOutput",
+  "updatedUtc": "2026-06-29T00:00:00+00:00"
+}

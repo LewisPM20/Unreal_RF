@@ -1,0 +1,21 @@
+Current snapshot
+
+Active runtime:
+- src/RenderFarm.Controller.Api
+- src/RenderFarm.Worker.Agent
+- src/RenderFarm.Persistence
+- src/RenderFarm.Domain
+- src/RenderFarm.Shared
+
+Retired Python runtime files:
+- legacy_python/controller_queue_ui.py
+- legacy_python/worker_server.py
+- legacy_python/renderfarm_launcher.py
+- legacy_python/renderfarm_db.py
+- legacy_python/*phase9_1*.py
+- legacy_python/phase10_verify_features.py
+
+Validation:
+- dotnet restore .\RenderFarm.sln
+- dotnet build .\RenderFarm.sln -c Debug
+- dotnet test .\RenderFarm.sln -c Debug

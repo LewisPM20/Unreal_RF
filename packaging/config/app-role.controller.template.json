@@ -1,0 +1,16 @@
+{
+  "role": "controller",
+  "hostName": "127.0.0.1",
+  "port": 9200,
+  "controllerUrl": "",
+  "discoveryEnabled": false,
+  "discoverySeconds": 5,
+  "discoveryPort": 39200,
+  "workerId": "",
+  "displayName": "",
+  "apiToken": "",
+  "unrealSearchRoot": "",
+  "projectPath": "",
+  "sharedOutputRoot": "",
+  "updatedUtc": "2026-06-29T00:00:00+00:00"
+}
