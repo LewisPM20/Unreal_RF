@@ -5,6 +5,7 @@ using RenderFarm.Persistence;
 using RenderFarm.Shared;
 
 var builder = WebApplication.CreateBuilder(args);
+builder.WebHost.UseStaticWebAssets();
 builder.Services.ConfigureHttpJsonOptions(options => RenderFarmJson.AddConverters(options.SerializerOptions));
 builder.Services.Configure<RenderFarmDatabaseOptions>(builder.Configuration.GetSection("RenderFarm:Database"));
 builder.Services.Configure<JobSchedulerOptions>(builder.Configuration.GetSection("RenderFarm:Scheduler"));
@@ -12,6 +13,7 @@ builder.Services.Configure<ControllerDiscoveryOptions>(builder.Configuration.Get
 builder.Services.Configure<ControllerSecurityOptions>(builder.Configuration.GetSection("RenderFarm:Security"));
 builder.Services.Configure<NotificationOptions>(builder.Configuration.GetSection("RenderFarm:Notifications"));
 builder.Services.AddHttpClient();
+builder.Services.AddSingleton<IActivityLog, InMemoryActivityLog>();
 builder.Services.AddSingleton<SqliteRenderFarmRepository>();
 builder.Services.AddSingleton<IRenderFarmDatabase>(sp => sp.GetRequiredService<SqliteRenderFarmRepository>());
 builder.Services.AddSingleton<IWorkerRepository>(sp => sp.GetRequiredService<SqliteRenderFarmRepository>());
@@ -59,6 +61,7 @@ app.UseStaticFiles();
 app.UseOptionalApiTokenProtection();
 
 app.MapSystemEndpoints();
+app.MapActivityEndpoints();
 app.MapWorkerEndpoints();
 app.MapProjectEndpoints();
 app.MapRenderProfileEndpoints();
@@ -66,4 +69,6 @@ app.MapJobEndpoints();
 app.MapSettingsEndpoints();
 
 app.Run();
+
+
 

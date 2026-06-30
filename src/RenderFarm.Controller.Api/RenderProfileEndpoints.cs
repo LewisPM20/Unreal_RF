@@ -18,7 +18,7 @@ public static class RenderProfileEndpoints
         group.MapGet("/{profileId}", async (string profileId, IRenderProfileRepository profiles, CancellationToken ct) =>
             await profiles.GetAsync(profileId, ct) is { } profile ? Results.Ok(profile.ToDto()) : Results.NotFound());
 
-        group.MapPost("/{profileId}/duplicate", async (string profileId, DuplicateRenderProfileRequest request, IRenderProfileRepository profiles, CancellationToken ct) =>
+        group.MapPost("/{profileId}/duplicate", async (string profileId, DuplicateRenderProfileRequest request, IRenderProfileRepository profiles, IActivityLog activity, CancellationToken ct) =>
         {
             var source = await profiles.GetAsync(profileId, ct);
             if (source is null)
@@ -32,10 +32,11 @@ public static class RenderProfileEndpoints
                 DisplayName = string.IsNullOrWhiteSpace(request.DisplayName) ? source.DisplayName + " Copy" : request.DisplayName.Trim()
             };
             await profiles.UpsertAsync(copy, ct);
+            activity.Add("success", "Render Setup", "Render setup duplicated", $"Render setup {copy.DisplayName} was created from {source.DisplayName}.", projectId: copy.ProjectId, renderProfileId: copy.Id, actionRoute: "projects");
             return Results.Created($"/api/render-profiles/{copy.Id}", copy.ToDto());
         });
 
-        group.MapPost("", async (RenderProfileDto dto, IRenderProfileRepository profiles, CancellationToken ct) =>
+        group.MapPost("", async (RenderProfileDto dto, IRenderProfileRepository profiles, IActivityLog activity, CancellationToken ct) =>
         {
             if (EndpointValidation.ValidateRenderProfile(dto) is { } problem)
             {
@@ -43,10 +44,11 @@ public static class RenderProfileEndpoints
             }
 
             await profiles.UpsertAsync(dto.ToDomain(), ct);
+            activity.Add("success", "Render Setup", "Render setup saved", $"Render setup {dto.DisplayName} is available for queueing.", projectId: dto.ProjectId, renderProfileId: dto.Id, actionRoute: "projects");
             return Results.Created($"/api/render-profiles/{dto.Id}", dto);
         });
 
-        group.MapPut("/{profileId}", async (string profileId, RenderProfileDto dto, IRenderProfileRepository profiles, CancellationToken ct) =>
+        group.MapPut("/{profileId}", async (string profileId, RenderProfileDto dto, IRenderProfileRepository profiles, IActivityLog activity, CancellationToken ct) =>
         {
             var profile = dto with { Id = profileId };
             if (EndpointValidation.ValidateRenderProfile(profile) is { } problem)
@@ -55,6 +57,7 @@ public static class RenderProfileEndpoints
             }
 
             await profiles.UpsertAsync(profile.ToDomain(), ct);
+            activity.Add("success", "Render Setup", "Render setup updated", $"Render setup {profile.DisplayName} was updated.", projectId: profile.ProjectId, renderProfileId: profile.Id, actionRoute: "projects");
             return Results.Ok(profile);
         });
 
@@ -74,3 +77,4 @@ public static class RenderProfileEndpoints
 }
 
 public sealed record DuplicateRenderProfileRequest(string? NewId = null, string? DisplayName = null);
+

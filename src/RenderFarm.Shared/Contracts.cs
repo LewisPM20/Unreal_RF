@@ -350,6 +350,22 @@ public sealed record JobFailureRequest(string LeaseId, string WorkerId, FailureC
 public sealed record WorkerSchedulingModeRequest(WorkerSchedulingMode Mode);
 
 /// <summary>
+/// Recent controller activity shown by the dashboard.
+/// </summary>
+public sealed record ActivityItemDto(
+    string Id,
+    DateTimeOffset TimestampUtc,
+    string Severity,
+    string Type,
+    string Title,
+    string Message,
+    string? WorkerId = null,
+    string? JobId = null,
+    string? ProjectId = null,
+    string? RenderProfileId = null,
+    string? ActionRoute = null);
+
+/// <summary>
 /// Compact controller summary used by the dashboard snapshot.
 /// </summary>
 public sealed record DashboardSummaryDto(
@@ -484,3 +500,4 @@ public static class RenderFarmContractMapper
 
     public static JobLeaseDto ToDto(this JobLease lease) => new(lease.Id, lease.JobId, lease.JobAttemptId, lease.WorkerId, lease.AcquiredAtUtc, lease.ExpiresAtUtc, lease.RenewedAtUtc, lease.ReleasedAtUtc, lease.ReleaseReason, lease.IsActive);
 }
+

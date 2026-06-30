@@ -190,7 +190,7 @@ Remaining project/profile gaps:
 
 ## Current dashboard capabilities
 
-The dashboard is a single static HTML file at `src/RenderFarm.Controller.Api/wwwroot/index.html` with inline CSS and JS.
+The controller dashboard is served from `src/RenderFarm.Controller.Api/wwwroot/index.html` with plain CSS/JavaScript modules under `wwwroot/css` and `wwwroot/js`. It remains framework-free and uses controller API endpoints for live data.
 
 Current capabilities:
 
@@ -200,18 +200,20 @@ Current capabilities:
 - Pending worker approval panel with approve/reject actions.
 - Shared output root status list.
 - Project and render profile list/create/delete forms.
-- Job table and queue job form.
+- Job table with queue filters for running, queued, completed, failed, and cancelled renders.
+- Job details drawer with lifecycle timestamps, attempts, events, failure summary, command/log copy actions, output path visibility, and retry/cancel controls where the current state machine supports them.
+- Recent completed renders panel on the overview with output copy actions.
+- Diagnostics tab backed by `GET /api/diagnostics` for safe controller status, database path, queue counts, worker heartbeats, shared output roots, and recent warnings.
 - Clear jobs, reset DB, expire leases, refresh/rescan controls.
 - Legacy JSON import for projects/profiles.
 - Chunking fields are preview-only: the dashboard can call the dry-run chunk planner and show frame ranges, but queueing still creates one normal render job.
 
 Current dashboard gaps:
 
-- Still a single large file with inline CSS/JS.
-- No dedicated details views for jobs/workers/projects.
-- No real-time updates; it polls every 10 seconds.
+- No real-time updates; it polls every 8 seconds.
 - No modal confirmation for high-risk reset; browser confirm is used.
-- No log tail/output artifact view.
+- No safe log-tail endpoint yet; attempts can show log file paths but not stream log contents in-browser.
+- Worker and project details are still compact panels rather than full dedicated detail pages.
 
 ## Current chunking limitations
 
@@ -240,3 +242,6 @@ Phase 11 should split and professionalize the dashboard UX now that phases 6-10 
 - Successful worker renders now verify that the configured output directory contains non-empty expected media/image files before completing the job. Missing output is reported as `RenderOutputMissing` and is not retried by default.
 - Controller startup runs a recovery service that expires stale leases and requeues or fails active jobs that no longer have a valid active lease according to the existing retry policy.
 - Workers can be placed into `Active`, `Draining`, or `Disabled` scheduling mode. The scheduler assigns only `Active` workers, while heartbeat status remains separate from operator scheduling mode.
+
+
+

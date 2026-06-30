@@ -67,7 +67,7 @@ public static class JobEndpoints
             }
         });
 
-        group.MapPost("", async (CreateRenderJobRequest request, IJobScheduler scheduler, CancellationToken ct) =>
+        group.MapPost("", async (CreateRenderJobRequest request, IJobScheduler scheduler, IActivityLog activity, CancellationToken ct) =>
         {
             if (EndpointValidation.ValidateCreateJob(request) is { } problem)
             {
@@ -77,6 +77,7 @@ public static class JobEndpoints
             try
             {
                 var job = await scheduler.CreateJobAsync(request, ct);
+                activity.Add("info", "Job", "Render queued", $"{job.Name} is waiting for a suitable worker.", jobId: job.Id, projectId: job.ProjectId, renderProfileId: job.RenderProfileId, actionRoute: "queue");
                 return Results.Created($"/api/jobs/{job.Id}", job.ToDto());
             }
             catch (InvalidOperationException ex)
@@ -98,7 +99,7 @@ public static class JobEndpoints
             return Results.Ok(job.ToDto());
         });
 
-        group.MapPost("/{jobId}/cancel", async (string jobId, IJobRepository jobs, IJobEventRepository events, CancellationToken ct) =>
+        group.MapPost("/{jobId}/cancel", async (string jobId, IJobRepository jobs, IJobEventRepository events, IActivityLog activity, CancellationToken ct) =>
         {
             var job = await jobs.GetAsync(jobId, ct);
             if (job is null)
@@ -119,10 +120,11 @@ public static class JobEndpoints
             var updated = job with { CancellationRequested = true, State = JobState.CancelRequested, UpdatedAtUtc = DateTimeOffset.UtcNow };
             await jobs.UpsertAsync(updated, ct);
             await events.AppendAsync(new JobEvent(Guid.NewGuid().ToString("N"), jobId, null, null, JobState.CancelRequested, FailureCategory.CancelledByUser, "Cancellation requested from dashboard/API", DateTimeOffset.UtcNow, null), ct);
+            activity.Add("warning", "Job", "Cancellation requested", $"{updated.Name} is being cancelled.", jobId: updated.Id, projectId: updated.ProjectId, renderProfileId: updated.RenderProfileId, actionRoute: "queue");
             return Results.Ok(updated.ToDto());
         });
 
-        group.MapPost("/{jobId}/retry", async (string jobId, IJobRepository jobs, IJobEventRepository events, CancellationToken ct) =>
+        group.MapPost("/{jobId}/retry", async (string jobId, IJobRepository jobs, IJobEventRepository events, IActivityLog activity, CancellationToken ct) =>
         {
             var job = await jobs.GetAsync(jobId, ct);
             if (job is null)
@@ -138,20 +140,49 @@ public static class JobEndpoints
             var updated = job with { State = JobState.Queued, AssignedWorkerId = null, CancellationRequested = false, FailureCategory = FailureCategory.None, Error = null, QueuedAtUtc = DateTimeOffset.UtcNow, UpdatedAtUtc = DateTimeOffset.UtcNow, FinishedAtUtc = null };
             await jobs.UpsertAsync(updated, ct);
             await events.AppendAsync(new JobEvent(Guid.NewGuid().ToString("N"), jobId, null, null, JobState.Queued, FailureCategory.None, "Job manually requeued", DateTimeOffset.UtcNow, null), ct);
+            activity.Add("info", "Job", "Render requeued", $"{updated.Name} was returned to the queue.", jobId: updated.Id, projectId: updated.ProjectId, renderProfileId: updated.RenderProfileId, actionRoute: "queue");
             return Results.Ok(updated.ToDto());
         });
 
         group.MapPost("/{jobId}/renew-lease", async (string jobId, JobLeaseRenewalRequest request, IJobScheduler scheduler, CancellationToken ct) =>
             await scheduler.RenewLeaseAsync(jobId, request, ct) is { } lease ? Results.Ok(lease) : Results.Conflict(new { error = "Lease is not active, does not match this worker, or has expired." }));
 
-        group.MapPost("/{jobId}/start", async (string jobId, JobStartRequest request, IJobScheduler scheduler, CancellationToken ct) =>
-            await scheduler.StartJobAsync(jobId, request, ct) is { } job ? Results.Ok(job) : Results.Conflict(new { error = "Job could not be started with the supplied lease." }));
+        group.MapPost("/{jobId}/start", async (string jobId, JobStartRequest request, IJobScheduler scheduler, IActivityLog activity, CancellationToken ct) =>
+        {
+            var job = await scheduler.StartJobAsync(jobId, request, ct);
+            if (job is null)
+            {
+                return Results.Conflict(new { error = "Job could not be started with the supplied lease." });
+            }
 
-        group.MapPost("/{jobId}/complete", async (string jobId, JobCompletionRequest request, IJobScheduler scheduler, CancellationToken ct) =>
-            await scheduler.CompleteJobAsync(jobId, request, ct) is { } job ? Results.Ok(job) : Results.Conflict(new { error = "Job could not be completed with the supplied lease." }));
+            activity.Add("info", "Job", "Render started", $"{job.Name} started on worker {request.WorkerId}.", workerId: request.WorkerId, jobId: job.Id, projectId: job.ProjectId, renderProfileId: job.RenderProfileId, actionRoute: "queue");
+            return Results.Ok(job);
+        });
 
-        group.MapPost("/{jobId}/fail", async (string jobId, JobFailureRequest request, IJobScheduler scheduler, CancellationToken ct) =>
-            await scheduler.FailJobAsync(jobId, request, ct) is { } job ? Results.Ok(job) : Results.Conflict(new { error = "Job could not be failed with the supplied lease." }));
+        group.MapPost("/{jobId}/complete", async (string jobId, JobCompletionRequest request, IJobScheduler scheduler, IActivityLog activity, CancellationToken ct) =>
+        {
+            var job = await scheduler.CompleteJobAsync(jobId, request, ct);
+            if (job is null)
+            {
+                return Results.Conflict(new { error = "Job could not be completed with the supplied lease." });
+            }
+
+            activity.Add("success", "Job", "Render completed", request.OutputDirectory is null ? $"{job.Name} completed successfully." : $"{job.Name} completed: {request.OutputDirectory}", workerId: request.WorkerId, jobId: job.Id, projectId: job.ProjectId, renderProfileId: job.RenderProfileId, actionRoute: "queue");
+            return Results.Ok(job);
+        });
+
+        group.MapPost("/{jobId}/fail", async (string jobId, JobFailureRequest request, IJobScheduler scheduler, IActivityLog activity, CancellationToken ct) =>
+        {
+            var job = await scheduler.FailJobAsync(jobId, request, ct);
+            if (job is null)
+            {
+                return Results.Conflict(new { error = "Job could not be failed with the supplied lease." });
+            }
+
+            var severity = job.State == JobState.Queued ? "warning" : "error";
+            activity.Add(severity, "Job", job.State == JobState.Queued ? "Render failed; retry scheduled" : "Render failed", $"{job.Name}: {request.FailureCategory} - {request.Error}", workerId: request.WorkerId, jobId: job.Id, projectId: job.ProjectId, renderProfileId: job.RenderProfileId, actionRoute: "queue");
+            return Results.Ok(job);
+        });
 
         group.MapPost("/expire-leases", async (IJobScheduler scheduler, CancellationToken ct) =>
             Results.Ok(new { expired = await scheduler.ExpireLeasesAsync(ct) }));
@@ -198,3 +229,6 @@ public static class JobEndpoints
             : $"{outputDirectory.TrimEnd('\\', '/')}/{chunkName}";
     }
 }
+
+
+

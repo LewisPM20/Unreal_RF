@@ -5,9 +5,14 @@ export const state = {
   workerStatus: '',
   busy: false,
   selectedJobId: null,
-  lastScan: null,
+  queueFilter: 'all',
   chunkPreview: null,
-  refreshTimer: null
+  refreshTimer: null,
+  notificationsPrimed: false,
+  activityNotificationsPrimed: false,
+  activities: [],
+  diagnostics: null,
+  seenActivityIds: new Set()
 };
 
 export function setSnapshot(snapshot) {
@@ -33,4 +38,20 @@ export function jobs() {
 export function summary() {
   return state.snapshot?.summary ?? null;
 }
+
+export function setActivities(activities) {
+  state.activities = Array.isArray(activities) ? activities : [];
+}
+
+export function activities() {
+  return state.activities ?? [];
+}
+export function setDiagnostics(diagnostics) {
+  state.diagnostics = diagnostics || null;
+}
+
+export function diagnostics() {
+  return state.diagnostics;
+}
+
 

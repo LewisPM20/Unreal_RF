@@ -611,13 +611,33 @@ public sealed class SqliteRenderFarmRepository(IOptions<RenderFarmDatabaseOption
     {
         await ExecutePragmaAsync(connection, "PRAGMA foreign_keys = ON;", cancellationToken);
         await ExecutePragmaAsync(connection, "PRAGMA busy_timeout = 5000;", cancellationToken);
+        await ConfigureJournalModeAsync(connection, cancellationToken);
+    }
+
+    private static async Task ConfigureJournalModeAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        if (await TryExecutePragmaAsync(connection, "PRAGMA journal_mode = WAL;", cancellationToken))
+        {
+            return;
+        }
+
+        await TryExecutePragmaAsync(connection, "PRAGMA journal_mode = DELETE;", cancellationToken);
+    }
+
+    private static async Task<bool> TryExecutePragmaAsync(SqliteConnection connection, string sql, CancellationToken cancellationToken)
+    {
         try
         {
-            await ExecutePragmaAsync(connection, "PRAGMA journal_mode = WAL;", cancellationToken);
+            await ExecutePragmaAsync(connection, sql, cancellationToken);
+            return true;
         }
         catch (SqliteException)
         {
-            await ExecutePragmaAsync(connection, "PRAGMA journal_mode = DELETE;", cancellationToken);
+            return false;
+        }
+        catch (InvalidOperationException)
+        {
+            return false;
         }
     }
 
@@ -758,5 +778,6 @@ public sealed class SqliteRenderFarmRepository(IOptions<RenderFarmDatabaseOption
         return reader.IsDBNull(ordinal) ? null : reader.GetInt32(ordinal);
     }
 }
+
 
 

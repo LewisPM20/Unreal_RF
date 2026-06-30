@@ -59,7 +59,7 @@ public static class ProjectEndpoints
             return result.Ok ? Results.Ok(result) : Results.BadRequest(result);
         });
 
-        group.MapPost("", async (ProjectProfileDto dto, IProjectRepository projects, CancellationToken ct) =>
+        group.MapPost("", async (ProjectProfileDto dto, IProjectRepository projects, IActivityLog activity, CancellationToken ct) =>
         {
             if (EndpointValidation.ValidateProject(dto) is { } problem)
             {
@@ -67,10 +67,11 @@ public static class ProjectEndpoints
             }
 
             await projects.UpsertAsync(dto.ToDomain(), ct);
+            activity.Add("success", "Project", "Project saved", $"Project {dto.DisplayName} is available for render setup.", projectId: dto.Id, actionRoute: "projects");
             return Results.Created($"/api/projects/{dto.Id}", dto);
         });
 
-        group.MapPut("/{projectId}", async (string projectId, ProjectProfileDto dto, IProjectRepository projects, CancellationToken ct) =>
+        group.MapPut("/{projectId}", async (string projectId, ProjectProfileDto dto, IProjectRepository projects, IActivityLog activity, CancellationToken ct) =>
         {
             var project = dto with { Id = projectId };
             if (EndpointValidation.ValidateProject(project) is { } problem)
@@ -79,6 +80,7 @@ public static class ProjectEndpoints
             }
 
             await projects.UpsertAsync(project.ToDomain(), ct);
+            activity.Add("success", "Project", "Project updated", $"Project {project.DisplayName} was updated.", projectId: project.Id, actionRoute: "projects");
             return Results.Ok(project);
         });
 
@@ -131,3 +133,5 @@ public static class ProjectEndpoints
 }
 
 public sealed record ProjectProfileImportExportDto(IReadOnlyList<ProjectProfileDto> Projects, IReadOnlyList<RenderProfileDto> RenderProfiles);
+
+

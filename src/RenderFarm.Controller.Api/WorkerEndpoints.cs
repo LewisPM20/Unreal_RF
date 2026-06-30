@@ -25,7 +25,7 @@ public static class WorkerEndpoints
         group.MapGet("/{workerId}", async (string workerId, IWorkerRepository workers, CancellationToken ct) =>
             await workers.GetAsync(workerId, ct) is { } worker ? Results.Ok(worker.ToDto()) : Results.NotFound());
 
-        group.MapPost("/heartbeat", async (WorkerHeartbeatDto heartbeat, IWorkerRepository workers, ISettingsRepository settings, CancellationToken ct) =>
+        group.MapPost("/heartbeat", async (WorkerHeartbeatDto heartbeat, IWorkerRepository workers, ISettingsRepository settings, IActivityLog activity, CancellationToken ct) =>
         {
             if (string.IsNullOrWhiteSpace(heartbeat.WorkerId))
             {
@@ -49,6 +49,17 @@ public static class WorkerEndpoints
             };
             var worker = reported with { Status = status, RegisteredAtUtc = existing?.RegisteredAtUtc ?? receivedAtUtc };
             await workers.UpsertAsync(worker, ct);
+            if (existing is null)
+            {
+                activity.Add(
+                    approval == WorkerApproval.Accepted ? "success" : "warning",
+                    "Worker",
+                    approval == WorkerApproval.Accepted ? "Worker connected" : "Worker awaiting approval",
+                    $"{worker.Name} reported from {worker.Hostname ?? worker.IpAddress ?? "unknown host"}.",
+                    workerId: worker.Id,
+                    actionRoute: "workers");
+            }
+
             var schedulingMode = await WorkerScheduling.GetAsync(settings, heartbeat.WorkerId, ct);
             return Results.Ok(new { accepted = approval == WorkerApproval.Accepted, approval, scheduling_mode = schedulingMode, worker_id = heartbeat.WorkerId, received_at_utc = receivedAtUtc });
         });
@@ -60,7 +71,7 @@ public static class WorkerEndpoints
             return Results.Ok(result.Where(worker => WorkerApproval.GetEffective(approvals, worker) == WorkerApproval.Pending).Select(x => x.ToDto()));
         });
 
-        group.MapPost("/{workerId}/approve", async (string workerId, IWorkerRepository workers, ISettingsRepository settings, CancellationToken ct) =>
+        group.MapPost("/{workerId}/approve", async (string workerId, IWorkerRepository workers, ISettingsRepository settings, IActivityLog activity, CancellationToken ct) =>
         {
             await WorkerApproval.SetAsync(settings, workerId, WorkerApproval.Accepted, ct);
             if (await workers.GetAsync(workerId, ct) is { } worker)
@@ -69,10 +80,11 @@ public static class WorkerEndpoints
                 await workers.UpsertAsync(worker with { Status = status }, ct);
             }
 
+            activity.Add("success", "Approval", "Worker approved", $"Worker {workerId} can now receive jobs.", workerId: workerId, actionRoute: "workers");
             return Results.Ok(new { worker_id = workerId, approval = WorkerApproval.Accepted });
         });
 
-        group.MapPost("/{workerId}/reject", async (string workerId, IWorkerRepository workers, ISettingsRepository settings, CancellationToken ct) =>
+        group.MapPost("/{workerId}/reject", async (string workerId, IWorkerRepository workers, ISettingsRepository settings, IActivityLog activity, CancellationToken ct) =>
         {
             await WorkerApproval.SetAsync(settings, workerId, WorkerApproval.Rejected, ct);
             if (await workers.GetAsync(workerId, ct) is { } worker)
@@ -80,6 +92,7 @@ public static class WorkerEndpoints
                 await workers.UpsertAsync(worker with { Status = WorkerStatus.Rejected }, ct);
             }
 
+            activity.Add("warning", "Approval", "Worker rejected", $"Worker {workerId} was blocked from scheduling.", workerId: workerId, actionRoute: "workers");
             return Results.Ok(new { worker_id = workerId, approval = WorkerApproval.Rejected });
         });
 
@@ -186,3 +199,6 @@ public static class WorkerEndpoints
         });
     }
 }
+
+
+

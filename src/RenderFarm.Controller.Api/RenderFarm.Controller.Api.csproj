@@ -13,5 +13,7 @@
     <Content Remove="*.db;*.db-shm;*.db-wal" />
     <None Remove="*.db;*.db-shm;*.db-wal" />
   </ItemGroup>
+  <ItemGroup>
+    <Content Update="wwwroot\**\*" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
 </Project>
-
