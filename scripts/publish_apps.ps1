@@ -331,23 +331,29 @@ This is the framework-dependent Windows package for RenderFarm. Install the Micr
 
 Launch the operator UI:
 
-````powershell
+~~~powershell
 .\RenderFarm.Launcher.exe
-````
+~~~
 
 Install for the current user:
 
-````powershell
+~~~powershell
 .\installer\install_renderfarm.ps1 -Role controller -CreateShortcuts
-````
+~~~
 
 Worker example:
 
-````powershell
-.\installer\install_renderfarm.ps1 -Role worker -ControllerUrl http://CONTROLLER_IP:9200 -WorkerId worker-pc-01 -UnrealSearchRoot "C:\Program Files\Epic Games" -ProjectPath "D:\Projects\Example\Example.uproject" -SharedOutputRoot "\\SERVER\RenderFarmOutput" -CreateShortcuts
-````
+~~~powershell
+.\installer\install_renderfarm.ps1 -Role worker -ControllerUrl http://CONTROLLER_IP:9200 -WorkerId worker-pc-01 -CreateShortcuts
+~~~
 
-Installed settings live under `%LOCALAPPDATA%\RenderFarm` and survive package replacement.
+Uninstall the package from Windows Apps, or use the packaged script for a manual cleanup:
+
+~~~powershell
+.\installer\uninstall_renderfarm.ps1 -RemoveShortcuts
+~~~
+
+Render outputs are never removed by default. Installed settings live under `%LOCALAPPDATA%\RenderFarm` and survive package replacement. Configure Unreal, project, profile, and shared-output settings from the controller dashboard; workers only need connection identity.
 "@ | Set-Content -Path (Join-Path $PackageRoot "README_PACKAGE.md")
 
 if ($Sign) {
@@ -373,6 +379,7 @@ Write-Host "Published launcher to $LauncherOut"
 Write-Host "Created distributable package at $PackageRoot ($(Format-ByteSize (Get-DirectorySize $PackageRoot)))"
 if ($selfContainedValue -eq "false") { Write-Host "Framework-dependent build: target PCs need the .NET 8 Desktop Runtime." }
 $global:LASTEXITCODE = 0
+
 
 
 

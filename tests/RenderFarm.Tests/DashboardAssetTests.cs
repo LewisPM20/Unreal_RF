@@ -87,6 +87,16 @@ public sealed class DashboardAssetTests
         Assert.DoesNotContain("Create Profile From Scan", combinedAssets);
         Assert.Contains("Preview chunks", combinedAssets);
         Assert.Contains("/api/jobs/chunk-preview", combinedAssets);
+        Assert.Contains("Controller Render Defaults", combinedAssets);
+        Assert.Contains("renderDefaultsForm", combinedAssets);
+        Assert.Contains("/api/settings/render-defaults", combinedAssets);
+        Assert.Contains("setRenderDefaults", combinedAssets);
+        Assert.Contains("RenderDefaultsDto", combinedAssets);
+        Assert.Contains("RenderExecutionDto", combinedAssets);
+        Assert.Contains("controllerConfiguration", combinedAssets);
+        Assert.Contains("newProfileDefaultOutputRoot", combinedAssets);
+        Assert.Contains("newProfileUnrealExecutablePath", combinedAssets);
+        Assert.Contains("Worker capability reports remain diagnostics", combinedAssets);
         Assert.Contains("Controller API Token", combinedAssets);
         Assert.Contains("renderFarmApiToken", combinedAssets);
         Assert.Contains("data-accept-worker", combinedAssets);

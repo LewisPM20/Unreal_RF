@@ -58,7 +58,14 @@ Filename: "{tmp}\dotnet-desktop-runtime.exe"; Parameters: "/install /quiet /nore
 #endif
 Filename: "{app}\RenderFarm.Launcher.exe"; Description: "Launch RenderFarm"; Flags: nowait postinstall skipifsilent
 
+[UninstallRun]
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\installer\uninstall_worker_service.ps1"" -InstallRoot ""{app}"" -RemoveRunner"; Flags: runhidden waituntilterminated; RunOnceId: "RemoveRenderFarmWorkerService"; Check: WorkerServiceUninstallScriptExists
 [Code]
+function WorkerServiceUninstallScriptExists: Boolean;
+begin
+  Result := FileExists(ExpandConstant('{app}\installer\uninstall_worker_service.ps1'));
+end;
+
 function RuntimeMajorAtLeast(Version: String; RequiredMajor: Integer): Boolean;
 var
   DotPos: Integer;

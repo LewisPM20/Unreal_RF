@@ -56,9 +56,7 @@ The controller machine also needs:
    .\scripts\start-worker.ps1 `
      -ControllerUrl http://127.0.0.1:9200 `
      -WorkerId local-worker-01 `
-     -ProjectPaths "C:\Path\To\Project.uproject" `
-     -SharedOutputRoots "C:\RenderFarmOutput" `
-     -UnrealSearchRoots "C:\Program Files\Epic Games"
+     -DisplayName "Local Worker 01"
    ```
 
 6. Approve the pending worker in the dashboard.
@@ -69,7 +67,7 @@ The controller machine also needs:
    Invoke-RestMethod http://127.0.0.1:9200/api/workers
    ```
 
-8. Create or import a project and render profile, then queue a job from the dashboard.
+8. Configure Controller Render Defaults in Settings, create or import a project and render profile, then queue a job from the dashboard.
 
 9. Open the job details drawer from the Jobs table. Click Close, then reopen the same job details row. Closing the details drawer must not cancel or mutate the job.
 
@@ -101,14 +99,12 @@ The controller machine also needs:
    .\scripts\start-worker.ps1 `
      -ControllerUrl http://CONTROLLER_IP:9200 `
      -WorkerId worker-pc-01 `
-     -ProjectPaths "D:\Projects\Example\Example.uproject" `
-     -SharedOutputRoots "\\SERVER\RenderFarmOutput" `
-     -UnrealSearchRoots "C:\Program Files\Epic Games"
+     -DisplayName "Render Worker 01"
    ```
 
 6. On the controller dashboard, approve the worker and confirm heartbeat/capabilities appear.
 
-7. Submit a job whose project/profile matches the worker capabilities.
+7. Submit a job whose project/profile can be resolved by the controller and whose project/output paths are reachable from the worker.
 
 8. Confirm a second worker request does not receive the same leased job before the first lease is completed, failed, or expired.
 

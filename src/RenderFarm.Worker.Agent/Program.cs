@@ -2,6 +2,7 @@ using RenderFarm.Worker.Agent;
 
 var builder = Host.CreateApplicationBuilder(args);
 builder.Services.Configure<WorkerAgentOptions>(builder.Configuration.GetSection("RenderFarm"));
+builder.Services.Configure<RenderProcessExecutionOptions>(builder.Configuration.GetSection("RenderFarm:Process"));
 builder.Services.AddHttpClient();
 builder.Services.AddSingleton<IWorkerIdentityProvider, WorkerIdentityProvider>();
 builder.Services.AddSingleton<IControllerEndpointProvider, ControllerEndpointProvider>();
@@ -17,3 +18,4 @@ builder.Services.AddHostedService<WorkerJobService>();
 
 var host = builder.Build();
 host.Run();
+

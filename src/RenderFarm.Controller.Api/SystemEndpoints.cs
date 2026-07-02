@@ -146,6 +146,7 @@ public static class SystemEndpoints
             IJobRepository jobs,
             ISettingsRepository settings,
             IOptions<RenderFarmDatabaseOptions> databaseOptions,
+            IOptions<ControllerSecurityOptions> securityOptions,
             IActivityLog activity,
             HttpRequest request,
             HttpResponse response,
@@ -158,14 +159,16 @@ public static class SystemEndpoints
             var profileListTask = profiles.ListAsync(ct);
             var jobListTask = jobs.ListAsync(ct);
             var approvalsTask = WorkerApproval.ListAsync(settings, ct);
+            var renderDefaultsTask = ControllerRenderDefaults.LoadAsync(settings, ct);
 
-            await Task.WhenAll(workerListTask, projectListTask, profileListTask, jobListTask, approvalsTask);
+            await Task.WhenAll(workerListTask, projectListTask, profileListTask, jobListTask, approvalsTask, renderDefaultsTask);
 
             var workerList = await workerListTask;
             var projectList = await projectListTask;
             var profileList = await profileListTask;
             var jobList = await jobListTask;
             var approvals = await approvalsTask;
+            var renderDefaults = await renderDefaultsTask;
             var approvedWorkers = workerList.Count(worker => string.Equals(WorkerApproval.GetEffective(approvals, worker), WorkerApproval.Accepted, StringComparison.OrdinalIgnoreCase));
             var pendingWorkers = workerList.Count(worker => string.Equals(WorkerApproval.GetEffective(approvals, worker), WorkerApproval.Pending, StringComparison.OrdinalIgnoreCase));
             var readyWorkers = workerList.Count(worker => IsWorkerSchedulable(worker, approvals, now));
@@ -197,6 +200,18 @@ public static class SystemEndpoints
                     dashboard = "/"
                 },
                 database = BuildDatabaseDiagnostics(databaseOptions.Value),
+                layout = BuildLayoutDiagnostics(),
+                security = new
+                {
+                    apiToken = SecretRedaction.DescribeConfiguredSecret(securityOptions.Value.ApiToken),
+                    protectedMutations = true,
+                    defaultBinding = "Launcher defaults to http://127.0.0.1:9200 unless the operator chooses another host."
+                },
+                controllerConfiguration = new
+                {
+                    sourceOfTruth = "Controller database and dashboard own render execution settings; workers execute assigned payloads and report diagnostics.",
+                    renderDefaults
+                },
                 counts = new
                 {
                     workers = workerList.Count,
@@ -233,9 +248,14 @@ public static class SystemEndpoints
                     .Where(item => string.Equals(item.Severity, "warning", StringComparison.OrdinalIgnoreCase) || string.Equals(item.Severity, "error", StringComparison.OrdinalIgnoreCase))
                     .Take(12)
                     .ToArray(),
+                startupRecovery = activity.ListRecent(100)
+                    .Where(item => string.Equals(item.Type, "Recovery", StringComparison.OrdinalIgnoreCase))
+                    .Take(12)
+                    .ToArray(),
                 support = new
                 {
                     contentRoot = AppContext.BaseDirectory,
+                    singleInstance = ControllerSingleInstanceGuard.BuildDiagnostics(),
                     process = Environment.ProcessPath,
                     machine = Environment.MachineName,
                     os = Environment.OSVersion.VersionString,
@@ -283,6 +303,33 @@ public static class SystemEndpoints
 
     private static int CountJobs(IReadOnlyList<RenderJob> jobs, JobState state) => jobs.Count(job => job.State == state);
 
+    private static object BuildLayoutDiagnostics()
+    {
+        var baseDirectory = AppContext.BaseDirectory;
+        var parent = Directory.GetParent(baseDirectory)?.FullName ?? baseDirectory;
+        var launcherCandidates = new[]
+        {
+            Path.Combine(baseDirectory, "RenderFarm.Launcher.exe"),
+            Path.Combine(parent, "RenderFarm.Launcher.exe")
+        };
+        var workerCandidates = new[]
+        {
+            Path.Combine(baseDirectory, "worker", "RenderFarm.Worker.Agent.exe"),
+            Path.Combine(parent, "worker", "RenderFarm.Worker.Agent.exe"),
+            Path.Combine(baseDirectory, "..", "worker", "RenderFarm.Worker.Agent.exe")
+        };
+        var dashboardIndex = Path.Combine(baseDirectory, "wwwroot", "index.html");
+
+        return new
+        {
+            baseDirectory,
+            processPath = Environment.ProcessPath,
+            dashboardIndexExists = File.Exists(dashboardIndex),
+            launcherExists = launcherCandidates.Any(File.Exists),
+            workerExecutableExists = workerCandidates.Any(path => File.Exists(Path.GetFullPath(path))),
+            expectedPackageShape = "RenderFarm.Launcher.exe beside controller/ and worker/ folders; controller serves wwwroot/index.html."
+        };
+    }
     private static object BuildDatabaseDiagnostics(RenderFarmDatabaseOptions options)
     {
         var connectionStringConfigured = !string.IsNullOrWhiteSpace(options.ConnectionString);
@@ -335,7 +382,5 @@ public static class SystemEndpoints
         response.Headers.Pragma = "no-cache";
     }
 }
-
-
 
 

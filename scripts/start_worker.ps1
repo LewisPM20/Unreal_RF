@@ -88,6 +88,9 @@ Set-IndexedEnvironmentValues -Prefix "RenderFarm__UnrealSearchRoots__" -Values $
 
 $controllerLabel = if ($ControllerUrl) { $ControllerUrl } elseif ($DiscoveryEnabled) { "LAN discovery, then localhost fallback" } else { "localhost fallback http://127.0.0.1:9200" }
 Write-Host "Starting RenderFarm worker"
+if ($ProjectPaths.Count -gt 0 -or $SharedOutputRoots.Count -gt 0 -or $UnrealSearchRoots.Count -gt 0) {
+    Write-Host "Legacy worker-side render path options were supplied. New production jobs receive Unreal, project, and output settings from the controller assignment payload." -ForegroundColor Yellow
+}
 Write-Host "  Controller: $controllerLabel"
 Write-Host "  Service URL: $ServiceUrl"
 Write-Host "  Project: $Project"

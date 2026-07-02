@@ -17,6 +17,8 @@ public sealed class WorkerJobService(
     IWorkerExecutionStateStore executionState,
     IUnrealEngineLocator unrealEngineLocator,
     IUnrealProcessLauncher unrealProcessLauncher,
+    IUnrealCommandBuilder unrealCommandBuilder,
+    ISharedOutputValidator sharedOutputValidator,
     ILogger<WorkerJobService> logger) : BackgroundService
 {
     private readonly SemaphoreSlim _jobLock = new(1, 1);
@@ -83,9 +85,17 @@ public sealed class WorkerJobService(
         try
         {
             await PostRequiredAsync(client, new Uri(controller, $"api/jobs/{Uri.EscapeDataString(job.Id)}/start"), new JobStartRequest(lease.Id, workerId, "Worker started Unreal render"), cancellationToken);
-            var project = await GetRequiredAsync<ProjectProfileDto>(client, new Uri(controller, $"api/projects/{Uri.EscapeDataString(job.ProjectId)}"), cancellationToken);
-            var profile = await GetRequiredAsync<RenderProfileDto>(client, new Uri(controller, $"api/render-profiles/{Uri.EscapeDataString(job.RenderProfileId)}"), cancellationToken);
-            var request = BuildRenderRequest(job, attempt, project, profile);
+            var request = assignment.Execution is not null
+                ? BuildRenderRequest(job, attempt, assignment.Execution)
+                : await BuildLegacyRenderRequestAsync(client, controller, job, attempt, cancellationToken);
+            var outputValidation = await sharedOutputValidator.ValidateAsync(new SharedOutputValidationRequest(request.OutputDirectory, ".", true), cancellationToken);
+            if (!outputValidation.Ok)
+            {
+                await PostRequiredAsync(client, new Uri(controller, $"api/jobs/{Uri.EscapeDataString(job.Id)}/fail"), new JobFailureRequest(lease.Id, workerId, outputValidation.FailureCategory, outputValidation.Message, null, RetryEligible: false), cancellationToken);
+                await executionState.ClearAsync(CancellationToken.None);
+                return;
+            }
+
             var preparation = await PrepareRenderAsync(job, attempt, request, cancellationToken);
             if (!preparation.Ok)
             {
@@ -94,8 +104,11 @@ public sealed class WorkerJobService(
                 return;
             }
 
+            var commandPreview = unrealCommandBuilder.Build(request, job.Id, attempt.AttemptNumber);
+            await PostRequiredAsync(client, new Uri(controller, $"api/jobs/{Uri.EscapeDataString(job.Id)}/attempts"), attempt with { CommandLine = commandPreview.CommandLine, LogFilePath = commandPreview.LogFilePath }, cancellationToken);
+
             logger.LogInformation("Worker {WorkerId} prepared job {JobId}, attempt {AttemptId}, lease {LeaseId}, request {RequestJsonPath}", workerId, job.Id, attempt.Id, lease.Id, preparation.RequestJsonPath);
-            logger.LogInformation("Worker {WorkerId} launching job {JobId}, attempt {AttemptId}, lease {LeaseId}, executable {Executable}, project {ProjectPath}, output {OutputDirectory}", workerId, job.Id, attempt.Id, lease.Id, request.UnrealExecutablePath, request.ProjectPath, request.OutputDirectory);
+            logger.LogInformation("Worker {WorkerId} launching job {JobId}, attempt {AttemptId}, lease {LeaseId}, process {CommandLine}, output {OutputDirectory}", workerId, job.Id, attempt.Id, lease.Id, commandPreview.CommandLine, request.OutputDirectory);
 
             using var renderCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             var cancellationRequestedByController = false;
@@ -130,7 +143,18 @@ public sealed class WorkerJobService(
 
             if (result.FailureCategory == FailureCategory.None)
             {
-                var verification = VerifyRenderOutput(request);
+                var successLog = CombineLogText(result.StandardOutput, result.StandardError);
+                var successClassification = RenderLogClassifier.Classify(successLog);
+                var blockingDiagnostic = successClassification.Diagnostics.FirstOrDefault(diagnostic => string.Equals(diagnostic.Severity, "error", StringComparison.OrdinalIgnoreCase));
+                if (blockingDiagnostic is not null)
+                {
+                    await PostRenderLogDiagnosticsAsync(client, controller, job.Id, attempt.Id, workerId, result.FailureCategory, successClassification, cancellationToken);
+                    await PostRequiredAsync(client, new Uri(controller, $"api/jobs/{Uri.EscapeDataString(job.Id)}/fail"), new JobFailureRequest(lease.Id, workerId, FailureCategory.RenderProcessFailed, ImproveUnrealFailureMessage(successLog, successClassification), result.ExitCode, RetryEligible: false), cancellationToken);
+                    await executionState.ClearAsync(CancellationToken.None);
+                    return;
+                }
+
+                var verification = VerifyRenderOutput(request, successLog);
                 if (!verification.Ok)
                 {
                     await PostRequiredAsync(client, new Uri(controller, $"api/jobs/{Uri.EscapeDataString(job.Id)}/fail"), new JobFailureRequest(lease.Id, workerId, verification.FailureCategory, verification.Error ?? "Render completed but expected output was not found.", result.ExitCode, RetryEligible: false), cancellationToken);
@@ -138,21 +162,40 @@ public sealed class WorkerJobService(
                     return;
                 }
 
-                await PostRequiredAsync(client, new Uri(controller, $"api/jobs/{Uri.EscapeDataString(job.Id)}/complete"), new JobCompletionRequest(lease.Id, workerId, result.ExitCode, request.OutputDirectory, "Unreal render completed and output was verified", verification.ArtifactSummary), cancellationToken);
+
+
+                await PostRequiredAsync(client, new Uri(controller, $"api/jobs/{Uri.EscapeDataString(job.Id)}/complete"), new JobCompletionRequest(lease.Id, workerId, result.ExitCode, verification.ArtifactSummary?.OutputDirectory ?? request.OutputDirectory, verification.Warning ?? "Unreal render completed and output was verified", verification.ArtifactSummary), cancellationToken);
                 await executionState.ClearAsync(CancellationToken.None);
                 return;
             }
 
-            var error = FirstNonEmpty(result.StandardError, result.StandardOutput, $"Unreal render failed with exit code {result.ExitCode}");
+            var rawLog = CombineLogText(result.StandardOutput, result.StandardError, $"Unreal render failed with exit code {result.ExitCode}");
+            var classification = RenderLogClassifier.Classify(rawLog);
+            await PostRenderLogDiagnosticsAsync(client, controller, job.Id, attempt.Id, workerId, result.FailureCategory, classification, cancellationToken);
+            var error = ImproveUnrealFailureMessage(rawLog, classification);
             await PostRequiredAsync(client, new Uri(controller, $"api/jobs/{Uri.EscapeDataString(job.Id)}/fail"), new JobFailureRequest(lease.Id, workerId, result.FailureCategory, error, result.ExitCode), cancellationToken);
             await executionState.ClearAsync(CancellationToken.None);
         }
+        catch (RenderExecutionValidationException ex)
+        {
+            logger.LogError(ex, "Assigned job {JobId}, attempt {AttemptId}, lease {LeaseId} had an invalid execution payload", job.Id, attempt.Id, lease.Id);
+            try
+            {
+                await PostRequiredAsync(client, new Uri(controller, $"api/jobs/{Uri.EscapeDataString(job.Id)}/fail"), new JobFailureRequest(lease.Id, workerId, ex.FailureCategory, ex.Message, null, RetryEligible: false), CancellationToken.None);
+                await executionState.ClearAsync(CancellationToken.None);
+            }
+            catch (Exception reportEx)
+            {
+                logger.LogError(reportEx, "Could not report invalid execution payload for job {JobId}, attempt {AttemptId}, lease {LeaseId} to controller", job.Id, attempt.Id, lease.Id);
+            }
+        }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            var category = ex is InvalidOperationException ? FailureCategory.CommandValidationFailed : FailureCategory.UnrealLaunchFailed;
             logger.LogError(ex, "Assigned job {JobId}, attempt {AttemptId}, lease {LeaseId} failed before or during launch", job.Id, attempt.Id, lease.Id);
             try
             {
-                await PostRequiredAsync(client, new Uri(controller, $"api/jobs/{Uri.EscapeDataString(job.Id)}/fail"), new JobFailureRequest(lease.Id, workerId, FailureCategory.UnrealLaunchFailed, ex.Message), CancellationToken.None);
+                await PostRequiredAsync(client, new Uri(controller, $"api/jobs/{Uri.EscapeDataString(job.Id)}/fail"), new JobFailureRequest(lease.Id, workerId, category, ImproveUnrealFailureMessage(ex.Message, RenderLogClassifier.Classify(ex.Message)), null, RetryEligible: false), CancellationToken.None);
                 await executionState.ClearAsync(CancellationToken.None);
             }
             catch (Exception reportEx)
@@ -270,52 +313,211 @@ public sealed class WorkerJobService(
         }
     }
 
-    private static RenderOutputVerificationResult VerifyRenderOutput(UnrealRenderRequest request)
+    private static RenderOutputVerificationResult VerifyRenderOutput(UnrealRenderRequest request, string logText)
     {
-        if (!Directory.Exists(request.OutputDirectory))
+        var supportedExtensions = GetSupportedOutputExtensions().ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var expectedDirectory = request.OutputDirectory;
+        var files = ScanOutputFiles(expectedDirectory, supportedExtensions);
+        if (files.Length > 0)
         {
-            return RenderOutputVerificationResult.Fail(FailureCategory.RenderOutputMissing, $"Render output directory does not exist: {request.OutputDirectory}");
+            return RenderOutputVerificationResult.Success(BuildArtifactSummary(expectedDirectory, files));
         }
 
-        var expectedExtensions = GetExpectedOutputExtensions(request.Profile).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var files = Directory.EnumerateFiles(request.OutputDirectory, "*", SearchOption.AllDirectories)
-            .Where(path => expectedExtensions.Contains(Path.GetExtension(path).TrimStart('.')))
-            .Select(path => new FileInfo(path))
-            .Where(file => file.Exists && file.Length > 0)
-            .OrderBy(file => file.FullName, StringComparer.OrdinalIgnoreCase)
-            .ToArray();
-
-        if (files.Length == 0)
+        var fallback = FindFallbackOutput(request, supportedExtensions);
+        if (fallback is not null)
         {
-            var expected = string.Join(", ", expectedExtensions.OrderBy(x => x, StringComparer.OrdinalIgnoreCase));
-            return RenderOutputVerificationResult.Fail(FailureCategory.RenderOutputMissing, $"Render completed but no non-empty {expected} output files were found in {request.OutputDirectory}.");
+            var warning = $"Render completed, but output was written to a different location: {fallback.Value.Directory}.";
+            return RenderOutputVerificationResult.Success(BuildArtifactSummary(fallback.Value.Directory, fallback.Value.Files), warning);
         }
 
+        if (LogIndicatesMovieRenderCompleted(logText))
+        {
+            var warning = $"Render completed, but no output files were found in the expected output directory. Check whether the MRQ preset wrote to a different folder: {expectedDirectory}.";
+            return RenderOutputVerificationResult.Success(new RenderArtifactSummaryDto(expectedDirectory, 0, 0, Array.Empty<string>(), Array.Empty<string>()), warning);
+        }
+
+        var extensions = string.Join(", ", supportedExtensions.OrderBy(x => x, StringComparer.OrdinalIgnoreCase).Select(x => "." + x));
+        return RenderOutputVerificationResult.Fail(FailureCategory.RenderOutputMissing, $"Render completed but no non-empty supported output files ({extensions}) were found in {expectedDirectory}.");
+    }
+
+    private static FileInfo[] ScanOutputFiles(string directory, ISet<string> supportedExtensions)
+    {
+        if (!Directory.Exists(directory))
+        {
+            return Array.Empty<FileInfo>();
+        }
+
+        try
+        {
+            return Directory.EnumerateFiles(directory, "*", SearchOption.AllDirectories)
+                .Where(path => supportedExtensions.Contains(Path.GetExtension(path).TrimStart('.')))
+                .Select(path => new FileInfo(path))
+                .Where(file => file.Exists && file.Length > 0)
+                .OrderBy(file => file.FullName, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return Array.Empty<FileInfo>();
+        }
+    }
+
+    private static (string Directory, FileInfo[] Files)? FindFallbackOutput(UnrealRenderRequest request, ISet<string> supportedExtensions)
+    {
+        var projectDirectory = Path.GetDirectoryName(Path.GetFullPath(request.ProjectPath));
+        if (string.IsNullOrWhiteSpace(projectDirectory))
+        {
+            return null;
+        }
+
+        var candidates = new[]
+        {
+            Path.Combine(projectDirectory, "Saved", "MovieRenders"),
+            Path.Combine(projectDirectory, "Saved", "Screenshots"),
+            Path.Combine(projectDirectory, "Saved", "VideoCaptures")
+        };
+
+        foreach (var candidate in candidates)
+        {
+            var files = ScanOutputFiles(candidate, supportedExtensions);
+            if (files.Length > 0)
+            {
+                return (candidate, files);
+            }
+        }
+
+        return null;
+    }
+
+    private static RenderArtifactSummaryDto BuildArtifactSummary(string outputDirectory, IReadOnlyList<FileInfo> files)
+    {
         var samples = files
             .Take(8)
-            .Select(file => Path.GetRelativePath(request.OutputDirectory, file.FullName))
+            .Select(file => Path.GetRelativePath(outputDirectory, file.FullName))
             .ToArray();
-        var summary = new RenderArtifactSummaryDto(request.OutputDirectory, files.Length, files.Sum(file => file.Length), samples);
-        return RenderOutputVerificationResult.Success(summary);
+        var extensions = files
+            .Select(file => Path.GetExtension(file.Name).TrimStart('.').ToLowerInvariant())
+            .Where(extension => !string.IsNullOrWhiteSpace(extension))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(extension => extension, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        return new RenderArtifactSummaryDto(outputDirectory, files.Count, files.Sum(file => file.Length), samples, extensions);
     }
 
-    private static IEnumerable<string> GetExpectedOutputExtensions(RenderProfile profile)
+    private static bool LogIndicatesMovieRenderCompleted(string logText)
     {
-        var raw = FirstNonEmpty(profile.DefaultOutputType, GetSetting(profile, "outputType"), GetSetting(profile, "fileType"), GetSetting(profile, "fileFormat"));
-        var tokens = raw.Split([',', ';', ' ', '|'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .Select(token => token.Trim().TrimStart('.').ToLowerInvariant())
-            .ToArray();
-        var known = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "mp4", "mov", "avi", "mxf", "png", "jpg", "jpeg", "exr" };
-        var resolved = tokens.Where(known.Contains).ToArray();
-        return resolved.Length > 0 ? resolved : ["mp4", "mov", "avi", "mxf", "png", "jpg", "jpeg", "exr"];
+        if (string.IsNullOrWhiteSpace(logText))
+        {
+            return false;
+        }
+
+        return logText.Contains("Movie Render", StringComparison.OrdinalIgnoreCase) &&
+               (logText.Contains("complete", StringComparison.OrdinalIgnoreCase) || logText.Contains("finished", StringComparison.OrdinalIgnoreCase) || logText.Contains("success", StringComparison.OrdinalIgnoreCase));
     }
 
-    private sealed record RenderOutputVerificationResult(bool Ok, FailureCategory FailureCategory, string? Error, RenderArtifactSummaryDto? ArtifactSummary)
+    private static IEnumerable<string> GetSupportedOutputExtensions()
     {
-        public static RenderOutputVerificationResult Success(RenderArtifactSummaryDto summary) => new(true, FailureCategory.None, null, summary);
+        return ["mov", "mp4", "avi", "mkv", "mxf", "png", "jpg", "jpeg", "exr", "tif", "tiff", "bmp", "wav", "aif", "aiff"];
+    }
+
+    private static string ImproveUnrealFailureMessage(string error, RenderLogClassificationDto classification)
+    {
+        var primary = classification.Diagnostics.FirstOrDefault(diagnostic => !string.Equals(diagnostic.Severity, "info", StringComparison.OrdinalIgnoreCase));
+        if (primary is not null)
+        {
+            return primary.Fix is null ? primary.Message : $"{primary.Message} Fix: {primary.Fix}";
+        }
+
+        return string.IsNullOrWhiteSpace(error) ? "Unreal render failed without a detailed log message." : error;
+    }
+
+    private static string CombineLogText(params string?[] parts) =>
+        string.Join(Environment.NewLine, parts.Where(part => !string.IsNullOrWhiteSpace(part))).Trim();
+
+    private static async Task PostRenderLogDiagnosticsAsync(HttpClient client, Uri controller, string jobId, string attemptId, string workerId, FailureCategory category, RenderLogClassificationDto classification, CancellationToken cancellationToken)
+    {
+        if (classification.Diagnostics.Count == 0 && classification.LoadErrors.Count == 0 && string.IsNullOrWhiteSpace(classification.RawExcerpt))
+        {
+            return;
+        }
+
+        var evt = new JobEventDto(
+            Guid.NewGuid().ToString("N"),
+            jobId,
+            attemptId,
+            workerId,
+            null,
+            category,
+            "Render log diagnostics",
+            DateTimeOffset.UtcNow,
+            JsonSerializer.Serialize(classification, RenderFarmJson.SerializerOptions));
+        await PostRequiredAsync(client, new Uri(controller, $"api/jobs/{Uri.EscapeDataString(jobId)}/events"), evt, cancellationToken);
+    }
+    private sealed class RenderExecutionValidationException(FailureCategory failureCategory, string message) : Exception(message)
+    {
+        public FailureCategory FailureCategory { get; } = failureCategory;
+    }
+    private sealed record RenderOutputVerificationResult(bool Ok, FailureCategory FailureCategory, string? Error, RenderArtifactSummaryDto? ArtifactSummary, string? Warning = null)
+    {
+        public static RenderOutputVerificationResult Success(RenderArtifactSummaryDto summary, string? warning = null) => new(true, FailureCategory.None, null, summary, warning);
         public static RenderOutputVerificationResult Fail(FailureCategory category, string error) => new(false, category, error, null);
     }
 
+    private async Task<UnrealRenderRequest> BuildLegacyRenderRequestAsync(HttpClient client, Uri controller, RenderJobDto job, JobAttemptDto attempt, CancellationToken cancellationToken)
+    {
+        var project = await GetRequiredAsync<ProjectProfileDto>(client, new Uri(controller, $"api/projects/{Uri.EscapeDataString(job.ProjectId)}"), cancellationToken);
+        var profile = await GetRequiredAsync<RenderProfileDto>(client, new Uri(controller, $"api/render-profiles/{Uri.EscapeDataString(job.RenderProfileId)}"), cancellationToken);
+        return BuildRenderRequest(job, attempt, project, profile);
+    }
+
+    private UnrealRenderRequest BuildRenderRequest(RenderJobDto job, JobAttemptDto attempt, RenderExecutionDto execution)
+    {
+        if (string.IsNullOrWhiteSpace(execution.UnrealExecutablePath))
+        {
+            throw new RenderExecutionValidationException(FailureCategory.UnrealExecutableMissing, "Controller assignment did not include an Unreal executable path.");
+        }
+
+        if (string.IsNullOrWhiteSpace(execution.ProjectPath))
+        {
+            throw new RenderExecutionValidationException(FailureCategory.ProjectPathMissing, "Controller assignment did not include a project .uproject path.");
+        }
+
+        if (string.IsNullOrWhiteSpace(execution.OutputDirectory))
+        {
+            throw new RenderExecutionValidationException(FailureCategory.SharedOutputUnreachable, "Controller assignment did not include an output directory.");
+        }
+
+        if (string.IsNullOrWhiteSpace(execution.LogDirectory))
+        {
+            throw new RenderExecutionValidationException(FailureCategory.CommandValidationFailed, "Controller assignment did not include a log directory.");
+        }
+
+        var unrealExecutablePath = Environment.ExpandEnvironmentVariables(execution.UnrealExecutablePath.Trim().Trim('"'));
+        var projectPath = Environment.ExpandEnvironmentVariables(execution.ProjectPath.Trim().Trim('"'));
+        var outputDirectory = Environment.ExpandEnvironmentVariables(execution.OutputDirectory.Trim().Trim('"'));
+        var logDirectory = Environment.ExpandEnvironmentVariables(execution.LogDirectory.Trim().Trim('"'));
+
+        if (!File.Exists(unrealExecutablePath))
+        {
+            throw new RenderExecutionValidationException(FailureCategory.UnrealExecutableMissing, $"Controller assignment Unreal executable was not found on this worker: {unrealExecutablePath}");
+        }
+
+        if (!File.Exists(projectPath) || !projectPath.EndsWith(".uproject", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new RenderExecutionValidationException(FailureCategory.UProjectMissing, $"Controller assignment project .uproject was not found on this worker: {projectPath}");
+        }
+
+        var timeoutSeconds = execution.TimeoutSeconds is > 0 ? execution.TimeoutSeconds.Value : options.Value.RenderTimeoutSeconds;
+        var timeout = timeoutSeconds > 0 ? TimeSpan.FromSeconds(timeoutSeconds) : (TimeSpan?)null;
+        return new UnrealRenderRequest(
+            unrealExecutablePath,
+            projectPath,
+            execution.RenderProfile.ToDomain(),
+            outputDirectory,
+            logDirectory,
+            timeout,
+            execution.Variables);
+    }
     private UnrealRenderRequest BuildRenderRequest(RenderJobDto job, JobAttemptDto attempt, ProjectProfileDto project, RenderProfileDto profile)
     {
         var workerId = identity.GetWorkerId();
@@ -401,3 +603,9 @@ public sealed class WorkerJobService(
 
     private static string FirstNonEmpty(params string?[] values) => values.FirstOrDefault(x => !string.IsNullOrWhiteSpace(x)) ?? string.Empty;
 }
+
+
+
+
+
+

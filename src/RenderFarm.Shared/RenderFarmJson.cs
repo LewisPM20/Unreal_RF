@@ -24,6 +24,8 @@ public static class RenderFarmJson
         options.Converters.Add(new JsonStringEnumConverter<WorkerStatus>());
         options.Converters.Add(new JsonStringEnumConverter<WorkerSchedulingMode>());
         options.Converters.Add(new JsonStringEnumConverter<RenderProfileType>());
+        options.Converters.Add(new JsonStringEnumConverter<RenderValidationSeverity>());
+        options.Converters.Add(new JsonStringEnumConverter<RenderValidationStatus>());
     }
 
     private static JsonSerializerOptions CreateSerializerOptions()
@@ -33,3 +35,4 @@ public static class RenderFarmJson
         return options;
     }
 }
+

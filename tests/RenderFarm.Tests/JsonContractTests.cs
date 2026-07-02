@@ -11,12 +11,31 @@ public sealed class JsonContractTests
     public void WorkerCanReadControllerAssignmentWithStringEnums()
     {
         var now = DateTimeOffset.UtcNow;
+        var profile = new RenderProfileDto(
+            "profile-1",
+            "project-1",
+            "Main Queue",
+            RenderProfileType.MrqQueue,
+            "/Game/MainQueue",
+            null,
+            "png",
+            false,
+            new Dictionary<string, string> { ["map"] = "/Game/Maps/Main" });
+        var execution = new RenderExecutionDto(
+            "C:\\UE_5.7\\Engine\\Binaries\\Win64\\UnrealEditor-Cmd.exe",
+            "D:\\Projects\\Demo\\Demo.uproject",
+            profile,
+            "\\\\server\\renders\\job-1",
+            "\\\\server\\renders\\job-1\\logs",
+            new Dictionary<string, string> { ["JobId"] = "job-1", ["OutputRoot"] = "\\\\server\\renders" },
+            3600);
         var assignment = new JobAssignmentDto(
             true,
             new RenderJobDto("job-1", "project-1", "profile-1", "Main Render", JobState.Reserved, 0, "worker-1", FailureCategory.None, null, null, now, now, now, null, null, false),
             new JobAttemptDto("attempt-1", "job-1", 1, "worker-1", JobState.Reserved, FailureCategory.None, null, null, null, now, null, null),
             new JobLeaseDto("lease-1", "job-1", "attempt-1", "worker-1", now, now.AddSeconds(30), null, null, null, true),
-            "Assigned");
+            "Assigned",
+            execution);
 
         var json = JsonSerializer.Serialize(assignment, RenderFarmJson.SerializerOptions);
         var roundTripped = JsonSerializer.Deserialize<JobAssignmentDto>(json, RenderFarmJson.SerializerOptions);
@@ -24,6 +43,9 @@ public sealed class JsonContractTests
         Assert.NotNull(roundTripped);
         Assert.Equal(JobState.Reserved, roundTripped.Job!.State);
         Assert.Equal(FailureCategory.None, roundTripped.Attempt!.FailureCategory);
+        Assert.NotNull(roundTripped.Execution);
+        Assert.Equal("D:\\Projects\\Demo\\Demo.uproject", roundTripped.Execution.ProjectPath);
+        Assert.Equal("job-1", roundTripped.Execution.Variables["JobId"]);
     }
 
     [Fact]
@@ -60,5 +82,6 @@ public sealed class JsonContractTests
 
         Assert.NotNull(assignment);
         Assert.Equal(JobState.Reserved, assignment.Job!.State);
+        Assert.Null(assignment.Execution);
     }
 }

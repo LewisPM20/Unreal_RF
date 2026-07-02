@@ -159,7 +159,8 @@ public sealed record RenderJob(
     DateTimeOffset? QueuedAtUtc,
     DateTimeOffset? StartedAtUtc,
     DateTimeOffset? FinishedAtUtc,
-    bool CancellationRequested);
+    bool CancellationRequested,
+    string? ValidationJson = null);
 
 /// <summary>
 /// One execution attempt for a render job.
@@ -210,3 +211,4 @@ public sealed record JobLease(
     DateTimeOffset? ReleasedAtUtc,
     string? ReleaseReason,
     bool IsActive);
+

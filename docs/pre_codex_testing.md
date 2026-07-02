@@ -35,7 +35,7 @@ Invoke-RestMethod http://127.0.0.1:9200/health
 ## 5. Local worker smoke test
 
 ```powershell
-.\scripts\start_worker.ps1 -ControllerUrl http://127.0.0.1:9200 -WorkerId local-worker-01 -ProjectPaths "C:\Path\To\Project.uproject" -SharedOutputRoots "C:\RenderFarmOutput" -UnrealSearchRoots "C:\Program Files\Epic Games"
+.\scripts\start_worker.ps1 -ControllerUrl http://127.0.0.1:9200 -WorkerId local-worker-01 -DisplayName "Local Worker 01"
 ```
 
 Then verify the worker appears:

@@ -13,6 +13,15 @@ public static class SettingsEndpoints
         group.MapGet("", async (ISettingsRepository settings, CancellationToken ct) =>
             Results.Ok((await settings.ListAsync(ct)).Select(x => new SettingDto(x.Key, x.ValueJson, x.UpdatedAtUtc))));
 
+
+        group.MapGet("/render-defaults", async (ISettingsRepository settings, CancellationToken ct) =>
+            Results.Ok(await ControllerRenderDefaults.LoadAsync(settings, ct)));
+
+        group.MapPut("/render-defaults", async (RenderDefaultsDto request, ISettingsRepository settings, CancellationToken ct) =>
+        {
+            var saved = await ControllerRenderDefaults.SaveAsync(settings, request, ct);
+            return Results.Ok(saved);
+        });
         group.MapGet("/{key}", async (string key, ISettingsRepository settings, CancellationToken ct) =>
             await settings.GetAsync(key, ct) is { } setting ? Results.Ok(new SettingDto(setting.Key, setting.ValueJson, setting.UpdatedAtUtc)) : Results.NotFound());
 
@@ -44,3 +53,4 @@ public static class SettingsEndpoints
         return app;
     }
 }
+

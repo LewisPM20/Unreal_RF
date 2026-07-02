@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Net.Sockets;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using RenderFarm.Domain;
 using RenderFarm.Shared;
 
@@ -350,10 +351,35 @@ public sealed class WorkerHeartbeatService(
             var endpoint = new Uri(await controllerEndpoints.GetControllerBaseUriAsync(cancellationToken), "api/workers/heartbeat");
             using var response = await client.PostAsJsonAsync(endpoint, heartbeat, RenderFarmJson.SerializerOptions, cancellationToken);
             response.EnsureSuccessStatusCode();
+            var acknowledgement = await response.Content.ReadFromJsonAsync<WorkerHeartbeatAcknowledgement>(RenderFarmJson.SerializerOptions, cancellationToken);
+            if (acknowledgement?.Accepted == true)
+            {
+                logger.LogDebug(
+                    "Worker {WorkerId} heartbeat accepted by controller; approval {Approval}; scheduling {SchedulingMode}; status {Status}",
+                    heartbeat.WorkerId,
+                    acknowledgement.Approval ?? "accepted",
+                    acknowledgement.SchedulingMode ?? "unknown",
+                    heartbeat.Status);
+            }
+            else
+            {
+                logger.LogInformation(
+                    "Worker {WorkerId} heartbeat reached controller but is not approved for scheduling yet; approval {Approval}",
+                    heartbeat.WorkerId,
+                    acknowledgement?.Approval ?? "pending");
+            }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            logger.LogWarning(ex, "Could not send heartbeat to controller");
+            logger.LogWarning(ex, "Controller unavailable for worker heartbeat; will retry");
         }
+    }
+
+    private sealed class WorkerHeartbeatAcknowledgement
+    {
+        public bool Accepted { get; set; }
+        public string? Approval { get; set; }
+        [JsonPropertyName("scheduling_mode")]
+        public string? SchedulingMode { get; set; }
     }
 }

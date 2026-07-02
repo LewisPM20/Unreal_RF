@@ -1,5 +1,6 @@
 using RenderFarm.Controller.Api;
 using RenderFarm.Domain;
+using RenderFarm.Shared;
 using Xunit;
 
 namespace RenderFarm.Tests;
@@ -53,6 +54,58 @@ public sealed class WorkerReadinessEvaluatorTests
         Assert.Contains(result.Reasons, reason => reason.Contains("does not contain RTX 4090", StringComparison.OrdinalIgnoreCase));
     }
 
+    [Fact]
+    public void ControllerDefaultsCanSatisfyUnrealAndOutputReadiness()
+    {
+        var worker = CreateWorker() with
+        {
+            Capabilities = CreateWorker().Capabilities with
+            {
+                UnrealInstallations = [],
+                SharedOutputRoots = []
+            }
+        };
+        var project = CreateProjectWithoutWorkerMapping();
+        var defaults = new RenderDefaultsDto(
+            "C:\\Program Files\\Epic Games\\UE_5.7\\Engine\\Binaries\\Win64\\UnrealEditor-Cmd.exe",
+            null,
+            "\\\\server\\renders",
+            "{JobId}");
+
+        var result = WorkerReadinessEvaluator.Evaluate(worker, project, CreateProfile(), defaults: defaults);
+
+        Assert.True(result.CanRun);
+        Assert.True(result.HasCompatibleUnreal);
+        Assert.True(result.CanWriteOutput);
+        Assert.Contains(result.Reasons, reason => reason.Contains("validated by the worker", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void ControllerManagedProfilePathsAreDiagnosticsNotWorkerSetupRequirements()
+    {
+        var worker = CreateWorker() with
+        {
+            Capabilities = CreateWorker().Capabilities with
+            {
+                UnrealInstallations = [],
+                SharedOutputRoots = []
+            }
+        };
+        var project = CreateProjectWithoutWorkerMapping();
+        var profile = CreateProfile(new Dictionary<string, string>
+        {
+            ["unrealExecutablePath"] = "C:\\UE\\Engine\\Binaries\\Win64\\UnrealEditor-Cmd.exe",
+            ["defaultOutputRoot"] = "D:\\RenderOutput"
+        });
+
+        var result = WorkerReadinessEvaluator.Evaluate(worker, project, profile);
+
+        Assert.True(result.CanRun);
+        Assert.True(result.HasCompatibleUnreal);
+        Assert.True(result.CanWriteOutput);
+    }
+
+
     private static DomainWorker CreateWorker(int? cpuCores = 16, double? ramGb = 64, string? gpuName = "NVIDIA RTX 4090", double? vramGb = 24) =>
         new(
             "worker-1",
@@ -86,6 +139,16 @@ public sealed class WorkerReadinessEvaluatorTests
             ["5.7"],
             null,
             [new WorkerProjectPath("path-1", "project-1", "worker-1", "C:\\UE_5.7", "D:\\Projects\\Demo\\Demo.uproject", null)]);
+
+    private static ProjectProfile CreateProjectWithoutWorkerMapping() =>
+        new(
+            "project-1",
+            "Demo",
+            "D:\\Projects\\Demo\\Demo.uproject",
+            "5.7",
+            ["5.7"],
+            null,
+            []);
 
     private static RenderProfile CreateProfile(IReadOnlyDictionary<string, string>? settings = null) =>
         new("profile-1", "project-1", "Profile", RenderProfileType.MrqQueue, "/Game/MRQ", null, "png", false, settings ?? new Dictionary<string, string>());

@@ -66,3 +66,9 @@ public static class ApiTokenProtection
             && string.Equals(authorizationHeader[bearerPrefix.Length..].Trim(), configuredToken, StringComparison.Ordinal);
     }
 }
+
+public static class SecretRedaction
+{
+    public static string DescribeConfiguredSecret(string? value) =>
+        string.IsNullOrWhiteSpace(value) ? "not configured" : "configured (redacted)";
+}

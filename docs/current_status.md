@@ -1,6 +1,6 @@
 # Current Status
 
-_Last updated: 2026-06-29._
+_Last updated: 2026-07-01._
 
 ## Runtime direction
 
@@ -75,7 +75,7 @@ Settings and compatibility queue endpoints:
 Shared DTOs live in `RenderFarm.Shared`:
 
 - Worker contracts: `WorkerHeartbeatDto`, `WorkerDto`, `WorkerCapabilitiesDto`, `UnrealEngineInstallationDto`, `ProjectPathStatusDto`, `SharedOutputStatusDto`.
-- Project/profile contracts: `ProjectProfileDto`, `WorkerProjectPathDto`, `RenderProfileDto`, `WorkerProjectReadinessDto`, `ReadinessMatrixDto`, `UnrealProjectScanRequest`, `UnrealProjectScanResultDto`, `PreparedRenderRequestDto`, `RenderPreparationResultDto`.
+- Project/profile/render contracts: `ProjectProfileDto`, `WorkerProjectPathDto`, `RenderProfileDto`, `RenderDefaultsDto`, `RenderExecutionDto`, `WorkerProjectReadinessDto`, `ReadinessMatrixDto`, `UnrealProjectScanRequest`, `UnrealProjectScanResultDto`, `PreparedRenderRequestDto`, `RenderPreparationResultDto`.
 - Job contracts: `RenderJobDto`, `JobAttemptDto`, `JobEventDto`, `CreateRenderJobRequest`, `JobLeaseDto`, `JobAssignmentDto`, `JobLeaseRenewalRequest`, `JobStartRequest`, `JobCompletionRequest`, `JobFailureRequest`, `RenderArtifactSummaryDto`.
 - Settings and validation contracts: `SettingDto`, `SharedOutputValidationRequest`, `SharedOutputValidationResult`, `SharedOutputPolicyDto`.
 - Notification and planning contracts: `JobNotificationPayloadDto`, `ChunkPreviewRequest`, `ChunkPreviewItemDto`, `ChunkPreviewResponseDto`.
@@ -108,12 +108,13 @@ Current scheduler behavior:
 - A worker cannot complete/fail another worker's lease.
 - Retry policy is category-based via `ConfiguredRetryPolicy`; retryable failures can requeue immediately or enter `RetryWait` with configurable delay/backoff.
 - Expired leases mark attempts stale and requeue, retry-wait, or fail according to policy.
+- A controller background recovery service periodically expires stale leases and promotes due `RetryWait` jobs without waiting for a worker request.
 
 Current lifecycle gaps:
 
 - Dashboard/API manual retry currently requeues only states allowed by the state machine; failed terminal jobs are not reopened directly.
 - Full user-facing retry controls and chunk-specific retry workflows remain future work.
-- Controller startup recovery for stale running jobs is still part of a later crash-recovery phase.
+- Controller startup recovery is implemented for active jobs without valid leases; deeper crash forensics and manual recovery workflows remain future work.
 
 ## Current worker lifecycle
 
@@ -125,7 +126,7 @@ Worker behavior:
 - New workers are persisted as pending until approved.
 - Approved idle/online workers may request jobs.
 - Worker polls controller for one job at a time in the current background loop.
-- Worker resolves project/profile DTOs, writes a deterministic per-attempt render request JSON, builds an Unreal render command from structured data, launches Unreal through the C# process launcher, and posts complete/fail.
+- Worker receives a controller-resolved execution payload when assigned, validates the supplied project/output paths, writes a deterministic per-attempt render request JSON, builds an Unreal render command from structured data, launches Unreal through the C# process launcher, and posts complete/fail. Legacy project/profile lookup remains as an upgrade fallback only.
 
 Worker hardening now in place:
 
@@ -171,7 +172,7 @@ Current discovery gaps:
 - Projects and render profiles are persisted in SQLite.
 - A project supports a default `.uproject` path, engine version hints, optional output policy id, and worker-specific path mappings.
 - A render profile supports MRQ queue, MRG graph, command template, or manual type, plus asset path, command template, default output type, chunking support flag, and free-form settings.
-- Dashboard supports creating projects/profiles manually, importing legacy-style JSON, filling project fields from worker heartbeat data, deleting profiles, and deleting projects if no jobs depend on them.
+- Dashboard supports controller-owned render defaults, creating projects/profiles manually, profile-level Unreal/output overrides, importing legacy-style JSON, filling project fields from worker heartbeat data, deleting profiles, and deleting projects if no jobs depend on them.
 
 Current project/profile status:
 
@@ -203,7 +204,7 @@ Current capabilities:
 - Job table with queue filters for running, queued, completed, failed, and cancelled renders.
 - Job details drawer with lifecycle timestamps, attempts, events, failure summary, command/log copy actions, output path visibility, and retry/cancel controls where the current state machine supports them.
 - Recent completed renders panel on the overview with output copy actions.
-- Diagnostics tab backed by `GET /api/diagnostics` for safe controller status, database path, queue counts, worker heartbeats, shared output roots, and recent warnings.
+- Diagnostics tab backed by `GET /api/diagnostics` for safe controller status, database path, controller-owned render defaults, queue counts, worker heartbeats, shared output roots, and recent warnings.
 - Clear jobs, reset DB, expire leases, refresh/rescan controls.
 - Legacy JSON import for projects/profiles.
 - Chunking fields are preview-only: the dashboard can call the dry-run chunk planner and show frame ranges, but queueing still creates one normal render job.
@@ -243,5 +244,19 @@ Phase 11 should split and professionalize the dashboard UX now that phases 6-10 
 - Controller startup runs a recovery service that expires stale leases and requeues or fails active jobs that no longer have a valid active lease according to the existing retry policy.
 - Workers can be placed into `Active`, `Draining`, or `Disabled` scheduling mode. The scheduler assigns only `Active` workers, while heartbeat status remains separate from operator scheduling mode.
 
+## Internal recovery, retry, and process safety
 
+- Failed terminal jobs are not reopened in place. The operator retry action creates a new queued job cloned from the failed source job, records traceability events on both jobs, and keeps the original failed job terminal for auditability.
+- The dashboard shows state-specific job actions: active jobs can be cancelled, failed jobs can be retried as new jobs, retry-wait jobs explain when policy-driven retry will happen, and succeeded/cancelled jobs do not show destructive default actions.
+- High-risk dashboard actions now use the in-app confirmation modal instead of basic browser confirms where practical.
+- Controller startup recovery records `Recovery` activity entries such as startup reconciliation started/clean/repaired, and Diagnostics exposes recent startup recovery activity.
+- The controller process uses a Windows named mutex scoped to the installation root. A second controller from the same install exits with a clear error instead of starting another scheduler against the same state.
+- Worker render process execution is centralized behind the C# launcher path. It captures bounded stdout/stderr, writes per-attempt logs, reports non-zero exits clearly, honors cancellation, enforces configured render timeout, and can stop a process that produces no stdout/stderr progress for the configured watchdog window.
+- Render child processes launched by the worker carry RenderFarm ownership metadata in their environment. Cleanup remains conservative: the worker kills only the process tree it directly launched for the current attempt; uncertain orphan detection is surfaced as a diagnostics concern rather than killing unrelated Unreal sessions.
 
+Current limitations:
+
+- Startup recovery is idempotent and policy-driven, but deep crash forensics are intentionally conservative.
+- Orphaned external Unreal processes are not automatically killed unless they are the active child process owned by the current worker attempt.
+- Distributed chunk execution remains disabled.
+- Dashboard live updates still use polling rather than SSE/WebSockets.

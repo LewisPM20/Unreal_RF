@@ -107,7 +107,7 @@ public static class WorkerEndpoints
             return Results.Ok(new { worker_id = workerId, scheduling_mode = request.Mode });
         });
 
-        group.MapGet("/{workerId}/readiness", async (string workerId, string projectId, string? renderProfileId, IWorkerRepository workers, IProjectRepository projects, IRenderProfileRepository profiles, CancellationToken ct) =>
+        group.MapGet("/{workerId}/readiness", async (string workerId, string projectId, string? renderProfileId, IWorkerRepository workers, IProjectRepository projects, IRenderProfileRepository profiles, ISettingsRepository settings, CancellationToken ct) =>
         {
             var worker = await workers.GetAsync(workerId, ct);
             var project = await projects.GetAsync(projectId, ct);
@@ -117,7 +117,8 @@ public static class WorkerEndpoints
             }
 
             var profile = string.IsNullOrWhiteSpace(renderProfileId) ? null : await profiles.GetAsync(renderProfileId, ct);
-            return Results.Ok(WorkerReadinessEvaluator.Evaluate(worker, project, profile));
+            var defaults = await ControllerRenderDefaults.LoadAsync(settings, ct);
+            return Results.Ok(WorkerReadinessEvaluator.Evaluate(worker, project, profile, defaults: defaults));
         });
 
         group.MapGet("/{workerId}/validate-project-path", async (string workerId, string path, IWorkerRepository workers, CancellationToken ct) =>

@@ -165,7 +165,7 @@
                     <Border x:Name="WorkerPanel" Background="{StaticResource PanelBrush}" BorderBrush="{StaticResource BorderBrushSoft}" BorderThickness="1" CornerRadius="12" Padding="18" Margin="0,0,0,16">
                         <StackPanel>
                             <TextBlock Text="Worker settings" FontSize="18" FontWeight="SemiBold" />
-                            <TextBlock Text="Point this machine at a controller and provide the Unreal/project/output paths it can use." Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" Margin="0,6,0,16" />
+                            <TextBlock Text="Point this machine at a controller. Render paths, Unreal executables, and output locations are managed from the controller dashboard." Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" Margin="0,6,0,16" />
 
                             <TextBlock Text="Controller URL" FontWeight="SemiBold" />
                             <TextBox x:Name="ControllerUrlBox" />
@@ -187,15 +187,16 @@
                                     <TextBox x:Name="DisplayNameBox" />
                                 </StackPanel>
                             </Grid>
+                            <StackPanel Visibility="Collapsed">
+                                <TextBlock Text="Legacy Unreal search root" FontWeight="SemiBold" />
+                                <TextBox x:Name="UnrealSearchRootBox" />
 
-                            <TextBlock Text="Unreal search root" FontWeight="SemiBold" />
-                            <TextBox x:Name="UnrealSearchRootBox" />
+                                <TextBlock Text="Legacy project path" FontWeight="SemiBold" />
+                                <TextBox x:Name="ProjectPathBox" />
 
-                            <TextBlock Text="Project path" FontWeight="SemiBold" />
-                            <TextBox x:Name="ProjectPathBox" />
-
-                            <TextBlock Text="Shared output root" FontWeight="SemiBold" />
-                            <TextBox x:Name="SharedOutputRootBox" />
+                                <TextBlock Text="Legacy shared output root" FontWeight="SemiBold" />
+                                <TextBox x:Name="SharedOutputRootBox" />
+                            </StackPanel>
                         </StackPanel>
                     </Border>
 

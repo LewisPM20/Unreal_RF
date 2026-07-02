@@ -1,7 +1,8 @@
 param(
     [string]$InstallRoot = "",
     [switch]$RemoveSettings,
-    [switch]$RemoveShortcuts
+    [switch]$RemoveShortcuts,
+    [switch]$RemoveWorkerService
 )
 
 $ErrorActionPreference = "Stop"
@@ -13,6 +14,19 @@ function Get-DefaultInstallRoot {
 
 if ([string]::IsNullOrWhiteSpace($InstallRoot)) { $InstallRoot = Get-DefaultInstallRoot }
 
+if ($RemoveWorkerService) {
+    $serviceScriptCandidates = @(
+        (Join-Path $InstallRoot "installer\uninstall_worker_service.ps1"),
+        (Join-Path $PSScriptRoot "uninstall_worker_service.ps1")
+    )
+    $serviceScript = $serviceScriptCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+    if ($serviceScript) {
+        & $serviceScript -InstallRoot $InstallRoot -RemoveRunner
+    }
+    else {
+        Write-Host "Worker service uninstall script was not found; skipping worker service cleanup."
+    }
+}
 if (Test-Path -LiteralPath $InstallRoot) {
     Remove-Item -LiteralPath $InstallRoot -Recurse -Force
     Write-Host "Removed RenderFarm install folder: $InstallRoot"
@@ -43,3 +57,5 @@ if ($RemoveSettings) {
 else {
     Write-Host "Saved role/settings were preserved. Pass -RemoveSettings to remove them."
 }
+
+

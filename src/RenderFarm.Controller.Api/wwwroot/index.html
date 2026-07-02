@@ -24,6 +24,7 @@
         <button class="nav-tab" data-view="create" type="button"><span>Setup</span></button>
         <button class="nav-tab" data-view="settings" type="button"><span>Settings</span></button>
         <button class="nav-tab" data-view="diagnostics" type="button"><span>Diagnostics</span></button>
+        <button class="nav-tab" data-view="help" type="button"><span>Help</span></button>
       </nav>
       <div class="sidebar-card">
         <span class="live-dot"></span>
@@ -81,7 +82,7 @@
             <div>
               <p class="eyebrow">Guided workflow</p>
               <h2>Start a new Unreal render</h2>
-              <p>Choose the project, render setup, output location, and worker readiness in one focused flow.</p>
+              <p>Choose the project, launch settings, output location, and command validation in one focused flow.</p>
             </div>
             <button class="button primary" data-new-render type="button">New Render</button>
           </section>
@@ -116,7 +117,7 @@
             <div class="panel-head">
               <div>
                 <h2>Shared Output Roots</h2>
-                <p>Writable roots reported by workers for render output.</p>
+                <p>Controller default output and worker-reported output diagnostics for render validation.</p>
               </div>
             </div>
             <div id="outputs" class="stack"></div>
@@ -159,17 +160,7 @@
             </div>
             <div id="profiles" class="stack"></div>
           </section>
-          <section class="panel wide">
-            <div class="panel-head">
-              <div>
-                <h2>Worker Readiness</h2>
-                <p>Check whether workers can run a selected project/profile before queueing.</p>
-              </div>
-            </div>
-            <div id="readinessResults" class="stack">
-              <div class="empty">Select Check readiness on a project to evaluate registered workers.</div>
-            </div>
-          </section>
+
         </div>
       </section>
 
@@ -261,8 +252,56 @@
           </section>
         </div>
       </section>
+
+      <section class="view" data-panel="help">
+        <div class="dashboard-grid help-layout">
+          <section class="panel wide help-hero">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">Operator guide</p>
+                <h2>Unreal command-line render help</h2>
+                <p>Use this reference when creating render setups, fixing blocked submissions, or diagnosing Unreal command-line failures.</p>
+              </div>
+              <label class="search help-search"><span>Search help</span><input id="helpSearch" type="search" placeholder="Search paths, MRQ, queue, errors"></label>
+            </div>
+          </section>
+          <section class="panel help-index">
+            <h3>Sections</h3>
+            <button class="link-button" type="button" data-help-anchor="quick-start">Quick start</button>
+            <button class="link-button" type="button" data-help-anchor="path-rules">Unreal path rules</button>
+            <button class="link-button" type="button" data-help-anchor="queue-vs-sequence">Queue vs sequence mode</button>
+            <button class="link-button" type="button" data-help-anchor="mrq-config">MRQ config preset</button>
+            <button class="link-button" type="button" data-help-anchor="mrq-queue">MRQ queue preset</button>
+            <button class="link-button" type="button" data-help-anchor="common-errors">Common errors</button>
+            <button class="link-button" type="button" data-help-anchor="command-examples">Command examples</button>
+          </section>
+          <section class="panel wide help-content" id="helpContent">
+            <article class="help-card" id="quick-start"><h3>Quick Start</h3><p>Start the controller, approve workers, set controller render defaults, register a project, create a render setup, review fast validation, then queue the render. Workers receive controller-owned job payloads and verify local project, Unreal, output, and log paths before launching Unreal.</p><ol><li>Confirm the worker appears online and approved.</li><li>Set a project .uproject path reachable by that worker.</li><li>Choose a render mode: saved MRQ queue, or single Level Sequence plus MRQ config preset.</li><li>Check Command Preview and Validation before pressing Start render.</li><li>Use Job Details for command, diagnostics, raw logs, and output artifacts.</li></ol></article>
+            <article class="help-card" id="queue-vs-sequence"><h3>Render Modes</h3><p><strong>Saved MRQ Queue</strong> uses a queue asset that already contains the render jobs. RenderFarm passes <code>-MoviePipelineConfig</code> only. Level Sequence is intentionally blank in this mode.</p><p><strong>Single Level Sequence + MRQ Config Preset</strong> passes both <code>-LevelSequence</code> and <code>-MoviePipelineConfig</code>. Use this when the sequence is selected by RenderFarm and the MRQ asset is a primary config preset.</p></article>
+            <article class="help-card" id="path-rules"><h3>Unreal Path Rules</h3><p>Filesystem paths point to files, such as <code>D:\Shows\Demo\Demo.uproject</code>. Unreal asset paths use mount points, such as <code>/Game/Render/HighQuality.HighQuality</code>. Do not include <code>/Content</code>; Unreal omits that part for asset references.</p><p>Object paths repeat the asset name after the dot. Map arguments are package paths, not object paths, so <code>/Game/Maps/Main.Main</code> becomes <code>/Game/Maps/Main</code>. Simple map names such as <code>V2</code> and <code>Minimal_Default1</code> are valid when your project/queue can resolve them.</p><button class="button" type="button" data-copy="/Game/Render/MainConfig.MainConfig" data-copy-label="asset path example">Copy asset example</button></article>
+            <article class="help-card" id="mrq-queue"><h3>Saved MRQ Queue Paths</h3><p>Queue mode accepts package-style queue paths such as <code>/Game/RenderConfig</code> or <code>/Game/Cinematics/myRenderQueue</code>. RenderFarm does not append <code>.AssetName</code> in queue mode because Unreal's command-line queue examples commonly use the queue package path.</p><p>If you copied a <code>.uasset</code> path from disk, <code>D:\Project\Content\RenderConfig.uasset</code> is safely converted to <code>/Game/RenderConfig</code> for queue mode.</p></article>
+            <article class="help-card" id="mrq-config"><h3>MRQ Config Preset Paths</h3><p>Single Sequence mode uses a Movie Pipeline Primary Config object path, such as <code>/Game/RenderConfig.RenderConfig</code>. If you enter <code>/Game/RenderConfig</code> in this mode, RenderFarm may append <code>.RenderConfig</code> because this argument expects an object path.</p><p>Fast validation checks shape and quoting only. It will say a path format looks valid, not that the asset exists. Use deep Unreal validation when you need asset-existence proof.</p></article>
+            <article class="help-card" id="output-verification"><h3>Output Verification</h3><p>RenderFarm accepts non-empty render artifacts with these extensions: <code>.mov</code>, <code>.mp4</code>, <code>.avi</code>, <code>.mkv</code>, <code>.png</code>, <code>.jpg</code>, <code>.jpeg</code>, <code>.exr</code>, <code>.tif</code>, <code>.tiff</code>, <code>.bmp</code>, <code>.wav</code>, <code>.aif</code>, and <code>.aiff</code>. PNG files are not required.</p><p>If Unreal reports a completed movie render but no artifacts are found in the expected folder, the job can complete with a warning so you can inspect whether the MRQ preset wrote elsewhere. Common fallback folders are <code>Saved/MovieRenders</code>, <code>Saved/Screenshots</code>, and <code>Saved/VideoCaptures</code>.</p></article>
+            <article class="help-card" id="network-output"><h3>Network And Mapped Drives</h3><p>Prefer UNC paths such as <code>\\SERVER\RenderFarmOutput</code> for shared output roots. Mapped drives can disappear when a worker runs as a service because services may run under a different Windows account. If output validation fails, verify the worker account can create and delete a small file in the output folder.</p></article>
+            <article class="help-card" id="common-errors"><h3>Common Errors and Fixes</h3><div class="help-error-grid"><div><strong>PowerShell ParserError from a quoted executable</strong><p>When manually testing in PowerShell, prepend <code>&amp;</code> before a quoted executable path. The C# app does not include <code>&amp;</code> because it launches the executable directly.</p></div><div><strong>Failed to find Pipeline Configuration asset to render</strong><p>The MRQ config or queue preset was not found. Queue mode can use <code>/Game/RenderConfig</code>; Single Sequence config mode usually needs <code>/Game/RenderConfig.RenderConfig</code>.</p></div><div><strong>Render launches game but does not render</strong><p>Check that the saved queue contains jobs, or that Single Sequence mode has a valid Level Sequence and MRQ config preset.</p></div><div><strong>No PNG files found but MOV exported</strong><p>This is valid. RenderFarm accepts movie files such as <code>.mov</code> and reports detected extensions in Job Details.</p></div><div><strong>Output written to wrong folder</strong><p>Inspect Job Details and the MRQ Output settings. If fallback scanning finds files, RenderFarm reports the actual folder.</p></div><div><strong>Mapped drive not visible to worker process</strong><p>Use a UNC path or run the worker under an account that owns the mapped drive.</p></div><div><strong>RLPlugin is Incompatible</strong><p>Disable, rebuild, or update the plugin for this Unreal version before command-line rendering.</p></div><div><strong>Datasmith/C4D material dependency missing</strong><p>Enable/install Datasmith Content or repair/reimport affected C4D materials.</p></div></div></article>
+            <article class="help-card" id="command-examples"><h3>Copyable Command Examples</h3><p>Manual PowerShell note: if the executable path is quoted, prepend <code>&amp;</code> when typing the command yourself. Do not include <code>&amp;</code> in RenderFarm command templates.</p><details class="command-preview" open><summary>Saved MRQ Queue mode</summary><code>"C:\Program Files\Epic Games\UE_5.8\Engine\Binaries\Win64\UnrealEditor-Cmd.exe" "D:\DHL_NEW\walkwayV5\DHLPractise.uproject" V2 -game -MoviePipelineConfig="/Game/RenderConfig" -windowed -Log -StdOut -allowStdOutLogVerbosity -Unattended</code></details><details class="command-preview"><summary>Single Level Sequence + config preset mode</summary><code>"C:\Program Files\Epic Games\UE_5.8\Engine\Binaries\Win64\UnrealEditor-Cmd.exe" "D:\DHL_NEW\walkwayV5\DHLPractise.uproject" V2 -game -LevelSequence="/Game/C4DFORUNREALV2/V2.V2" -MoviePipelineConfig="/Game/RenderConfig.RenderConfig" -windowed -Log -StdOut -allowStdOutLogVerbosity -Unattended</code></details></article>
+            <article class="help-card"><h3>Troubleshooting Checklist</h3><ol><li>Confirm the worker is online, approved, and idle.</li><li>Open Command Preview and confirm the map, queue/config, and sequence mode are correct.</li><li>Verify the project .uproject and UnrealEditor-Cmd.exe exist on the worker machine.</li><li>Verify the output folder is writable by the worker process account.</li><li>Open Latest Log Diagnostics, then expand Raw Log if the summary is not enough.</li><li>For asset-existence questions, run deep validation in Unreal rather than relying on fast path validation.</li></ol></article>
+            <article class="help-card"><h3>Validation Badges</h3><p><strong>Ready</strong> means fast validation found no blockers. <strong>Review</strong> means a safe normalization or warning exists. <strong>Blocked</strong> means the render cannot be submitted until the top blocker is fixed. Fast validation does not prove assets exist inside Unreal.</p></article>
+          </section>        </div>
+      </section>
       <section class="view" data-panel="settings">
         <div class="dashboard-grid">
+          <section class="panel wide">
+            <div class="panel-head"><div><h2>Controller Render Defaults</h2><p>Default Unreal and output settings used when a project or render profile does not override them.</p></div></div>
+            <form id="renderDefaultsForm" class="form-grid">
+              <label class="full">Unreal executable path<input name="unrealExecutablePath" list="engineRootList" placeholder="C:\Program Files\Epic Games\UE_5.7\Engine\Binaries\Win64\UnrealEditor-Cmd.exe"></label>
+              <label class="full">Unreal search root<input name="unrealSearchRoot" list="engineRootList" placeholder="C:\Program Files\Epic Games\UE_5.7"></label>
+              <label class="full">Shared output root<input name="sharedOutputRoot" list="outputRootList" placeholder="\\SERVER\RenderFarmOutput"></label>
+              <label>Output subfolder pattern<input name="outputSubfolderPattern" placeholder="{JobId}" value="{JobId}"></label>
+              <div class="full callout">Workers validate controller-supplied paths when a job is assigned. Worker capability reports remain diagnostics, not the source of render configuration.</div>
+              <div class="full inline-actions"><button class="button primary" type="submit">Save render defaults</button></div>
+            </form>
+          </section>
           <section class="panel">
             <div class="panel-head"><div><h2>Controller API Token</h2><p>Used by this browser for protected controller actions when token protection is enabled.</p></div></div>
             <div class="form-grid">
@@ -303,8 +342,8 @@
       <div class="modal-head wizard-head">
         <div>
           <p class="eyebrow">New render</p>
-          <h2 id="newRenderTitle">Queue a render</h2>
-          <p class="subtle">Move through project, render setup, output, and review without touching the advanced forms.</p>
+          <h2 id="newRenderTitle">Start a render</h2>
+          <p class="subtle">Validate Unreal paths, preview the generated command, then submit the render.</p>
         </div>
         <button class="icon-button" type="button" data-close-modal="newRenderModal" aria-label="Close new render wizard">Close</button>
       </div>
@@ -350,32 +389,46 @@
             <div class="form-grid">
               <label>Setup name<input name="newProfileName" placeholder="Cinematic final render"><small>This is the name shown in the queue.</small></label>
               <label>Setup ID<input name="newProfileId" placeholder="Auto-generated if blank"><small>Stable internal ID for this setup.</small></label>
-              <label>Render mode<select name="newProfileType"><option value="MrqQueue">Movie Render Queue preset</option><option value="MrgGraph">Movie Render Graph</option><option value="CommandTemplate">Custom command/template</option><option value="Manual">Basic/manual render</option></select><small>Choose how Unreal should be launched.</small></label>
-              <label data-wizard-asset-field>MRQ/MRG asset<input name="newProfileAsset" placeholder="/Game/.../MoviePipelineQueueConfig"><small>Content Browser asset path for MRQ/MRG when applicable.</small></label>
-              <label>Map / level<input name="newProfileMap" placeholder="/Game/Maps/Main"><small>Optional level argument passed to Unreal.</small></label>
+              <label>Render mode<select name="newProfileType"><option value="MrqQueue">Movie Render Queue</option><option value="MrgGraph">Movie Render Graph</option><option value="CommandTemplate">Custom command/template</option><option value="Manual">Basic/manual render</option></select><small>Choose how Unreal should be launched.</small></label>
+              <label data-wizard-mrq-mode-field>MRQ launch style<select name="newProfileMrqMode"><option value="Queue">Saved MRQ Queue asset</option><option value="SingleSequence">Single Level Sequence + config preset</option></select><small>Queue mode uses only -MoviePipelineConfig. Single Sequence mode also passes -LevelSequence.</small></label>
+              <label data-wizard-asset-field>MRQ/MRG config or queue<input name="newProfileAsset" placeholder="/Game/Cinematics/myRenderQueue"><small>Queue mode accepts /Game/QueueAsset. Single Sequence mode expects a config preset like /Game/RenderConfig.RenderConfig.</small></label>
+              <label>Map / level <button class="field-help" type="button" data-help-anchor="path-rules">?</button><input name="newProfileMap" placeholder="Minimal_Default1"><small>Use a simple map name like Minimal_Default1 or a package path like /Game/Maps/Main. Object paths are converted.</small></label><label data-wizard-sequence-field>Level Sequence <button class="field-help" type="button" data-help-anchor="queue-vs-sequence">?</button><input name="newProfileSequence" placeholder="/Game/Cinematics/Seq01.Seq01"><small>Required only for Single Level Sequence + config preset mode.</small></label>
               <label>Extra Unreal args<input name="newProfileExtraArgs" placeholder="-windowed -Unattended"><small>Optional command-line arguments.</small></label>
+              <label class="full">Default output root<input name="newProfileDefaultOutputRoot" list="outputRootList" placeholder="Uses controller default when blank"><small>Optional profile-specific output root.</small></label>
+              <label>Unreal executable<input name="newProfileUnrealExecutablePath" list="engineRootList" placeholder="Uses controller default when blank"><small>Optional profile-specific Unreal command path.</small></label>
+              <label>Output pattern<input name="newProfileOutputSubfolderPattern" placeholder="{JobId}"><small>Folder pattern below the selected output root.</small></label>
               <label class="full" data-wizard-command-field>Command template<textarea name="newProfileCommandTemplate" rows="3" placeholder="{project} {map} -game -MoviePipelineConfig={asset} -Log -StdOut"></textarea><small>Used only for custom command/template mode.</small></label>
             </div>
           </div>
         </section>
         <section class="wizard-pane" data-wizard-pane="3">
-          <div class="wizard-section-head"><h3>Output Location and Worker Readiness</h3><p>Choose where frames should land and review whether workers look ready.</p></div>
+          <div class="wizard-section-head"><h3>Output and Validation</h3><p>Choose where frames should land. Worker availability is checked automatically by the controller.</p></div>
           <div class="form-grid">
             <label class="full">Output location<input id="newRenderOutput" name="outputDirectory" list="outputRootList" placeholder="Shared output folder"><small>Use a path every rendering worker can write to.</small></label>
             <label>Name<input name="jobName" placeholder="Shot, sequence, or delivery name"><small>Shown in the queue and job details.</small></label>
             <label>Priority<input name="priority" type="number" value="0"><small>Higher priority jobs are reserved first.</small></label>
           </div>
-          <div id="newRenderReadiness" class="readiness-summary"></div>
+          <div id="newRenderReadiness" class="readiness-summary"></div><div id="newRenderPathValidation" class="readiness-summary"></div>
         </section>
         <section class="wizard-pane" data-wizard-pane="4">
-          <div class="wizard-section-head"><h3>Review and Queue</h3><p>Confirm the render details before creating the job.</p></div>
-          <div id="newRenderReview" class="review-grid"></div>
-        </section>
+  <div class="wizard-section-head">
+    <h3>Review and Start</h3>
+    <p>Confirm the render details and inspect the generated Unreal command before creating the job.</p>
+  </div>
+
+  <div id="newRenderReview" class="review-grid"></div>
+
+  <div class="review-start-actions">
+    <button class="button primary" type="submit">
+      Start render
+    </button>
+  </div>
+</section>
       </div>
       <div class="modal-actions wizard-actions">
         <button id="newRenderBackBtn" class="button" type="button">Back</button>
         <button id="newRenderNextBtn" class="button primary" type="button">Next</button>
-        <button id="newRenderQueueBtn" class="button primary hidden" type="submit">Queue Render</button>
+        <button id="newRenderQueueBtn" class="button primary hidden" type="submit">Start render</button>
       </div>
     </form>
   </dialog>
@@ -423,14 +476,21 @@
         <label>Profile ID<input name="id" placeholder="profile-id" required></label>
         <label>Project<select name="projectId" required></select></label>
         <label>Name<input name="displayName" placeholder="Profile display name" required></label>
-        <label>Type<select name="type"><option value="MrqQueue">MRQ Queue</option><option value="MrgGraph">MRG Graph</option><option value="CommandTemplate">Command Template</option><option value="Manual">Manual</option></select></label>
-        <label>Map / level argument<input name="mapName" placeholder="Map or level argument"></label>
-        <label>MRQ/MRG asset<input name="assetPath" placeholder="/Game/.../MoviePipelineQueueConfig"></label>
+        <label>Type<select name="type"><option value="MrqQueue">Movie Render Queue</option><option value="MrgGraph">MRG Graph</option><option value="CommandTemplate">Command Template</option><option value="Manual">Manual</option></select></label>
+        <label>MRQ launch style<select name="mrqMode"><option value="Queue">Saved MRQ Queue asset</option><option value="SingleSequence">Single Level Sequence + config preset</option></select></label>
+        <label>Map / level argument<input name="mapName" placeholder="Minimal_Default1 or /Game/Maps/Main"></label>
+        <label>Level Sequence<input name="levelSequence" placeholder="/Game/Cinematics/Seq01.Seq01"></label>
+        <label>MRQ/MRG asset<input name="assetPath" placeholder="/Game/Cinematics/myRenderQueue or /Game/RenderConfig.RenderConfig"></label>
         <label class="full">Extra Unreal args<input name="extraArgs" placeholder="Additional Unreal command arguments"></label>
         <label>Minimum CPU cores<input name="minCpuCores" type="number" min="1" placeholder="Optional"></label>
         <label>Minimum RAM (GB)<input name="minRamGb" type="number" min="0" step="0.1" placeholder="Optional"></label>
         <label>Minimum VRAM (GB)<input name="minVramGb" type="number" min="0" step="0.1" placeholder="Optional"></label>
         <label>GPU name contains<input name="gpuNameContains" placeholder="RTX, Quadro, Radeon"></label>
+        <label class="full">Unreal executable<input name="unrealExecutablePath" list="engineRootList" placeholder="Uses controller default when blank"></label>
+        <label class="full">Unreal search root<input name="unrealSearchRoot" list="engineRootList" placeholder="Uses controller default when blank"></label>
+        <label class="full">Default output root<input name="defaultOutputRoot" list="outputRootList" placeholder="Uses controller default when blank"></label>
+        <label>Output pattern<input name="outputSubfolderPattern" placeholder="{JobId}"></label>
+        <label>Timeout seconds<input name="timeoutSeconds" type="number" min="0" placeholder="0 means no timeout"></label>
         <label class="full">Command template<textarea name="commandTemplate" rows="3" placeholder="{project} {map} -game -MoviePipelineConfig={asset} -windowed -Log -StdOut -Unattended"></textarea></label>
       </div>
       <div class="modal-actions">
@@ -456,14 +516,14 @@
         <label>Project<select name="projectId" required></select></label>
         <label>Render profile<select name="renderProfileId" required></select></label>
         <label class="full">Output directory<input name="outputDirectory" list="outputRootList" placeholder="Shared output folder for this render"></label>
-        <label>Frame start<input name="frameStart" type="number" placeholder="Preview only"></label>
-        <label>Frame end<input name="frameEnd" type="number" placeholder="Preview only"></label>
-        <label>Chunk size<input name="chunkSizeFrames" type="number" min="1" placeholder="Preview only"></label>
-        <div class="full callout">Chunk preview is a planning check only. Queueing currently creates one normal render job.</div>
-        <div id="chunkPreview" class="full chunk-preview empty">Enter a frame range to preview deterministic chunks.</div>
+        <label class="hidden">Frame start<input name="frameStart" type="number" placeholder="Preview only"></label>
+        <label class="hidden">Frame end<input name="frameEnd" type="number" placeholder="Preview only"></label>
+        <label class="hidden">Chunk size<input name="chunkSizeFrames" type="number" min="1" placeholder="Preview only"></label>
+        <div class="full callout hidden">Chunk preview is currently disabled until distributed frame ranges are production-ready.</div>
+        <div id="chunkPreview" class="full chunk-preview empty hidden"></div>
       </div>
       <div class="modal-actions">
-        <button id="previewChunksBtn" class="button" type="button">Preview chunks</button>
+        <button id="previewChunksBtn" class="button hidden" type="button">Preview chunks</button>
         <button class="button" type="button" data-close-modal="jobModal">Cancel</button>
         <button class="button primary" type="submit">Queue job</button>
       </div>
@@ -492,6 +552,26 @@
         <div id="jobDrawerSummary" class="detail-grid"></div>
       </section>
       <section class="detail-section">
+        <h3>Command Preview</h3>
+        <div id="jobDrawerCommand" class="stack compact"></div>
+      </section>
+      <section class="detail-section">
+        <h3>Validation</h3>
+        <div id="jobDrawerValidation" class="stack compact"></div>
+      </section>
+      <section class="detail-section">
+        <h3>Warnings</h3>
+        <div id="jobDrawerWarnings" class="stack compact"></div>
+      </section>
+      <section class="detail-section">
+        <h3>Latest Log Diagnostics</h3>
+        <div id="jobDrawerLogDiagnostics" class="stack compact"></div>
+      </section>
+      <section class="detail-section">
+        <h3>Raw Log</h3>
+        <div id="jobDrawerRawLog" class="stack compact"></div>
+      </section>
+      <section class="detail-section">
         <h3>Artifacts</h3>
         <div id="jobDrawerArtifacts" class="stack compact"></div>
       </section>
@@ -508,8 +588,28 @@
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
   <script type="module" src="/js/dashboard.js"></script>
-</body>
+
+  <dialog id="confirmActionModal" class="app-modal" aria-labelledby="confirmActionTitle">
+    <form method="dialog" class="modal-card confirm-card">
+      <div class="modal-head">
+        <div><p class="eyebrow" id="confirmActionEyebrow">Confirm action</p><h2 id="confirmActionTitle">Confirm action</h2><p id="confirmActionMessage">Review the action before continuing.</p></div>
+        <button class="icon-button" type="button" data-confirm-cancel aria-label="Cancel action">Close</button>
+      </div>
+      <div class="modal-body">
+        <div id="confirmActionDetails" class="callout"></div>
+      </div>
+      <div class="modal-actions">
+        <button class="button" type="button" data-confirm-cancel>Cancel</button>
+        <button id="confirmActionProceed" class="button danger" type="button" data-confirm-proceed>Continue</button>
+      </div>
+    </form>
+  </dialog></body>
 </html>
+
+
+
+
+
 
 
 

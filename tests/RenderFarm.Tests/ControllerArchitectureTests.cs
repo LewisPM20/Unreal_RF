@@ -20,6 +20,16 @@ public sealed class ControllerArchitectureTests
     }
 
     [Fact]
+    public void ProgramRegistersStartupAndPeriodicRecoveryServices()
+    {
+        var repoRoot = FindRepoRoot();
+        var program = File.ReadAllText(Path.Combine(repoRoot, "src", "RenderFarm.Controller.Api", "Program.cs"));
+
+        Assert.Contains("ControllerStartupRecoveryService", program);
+        Assert.Contains("ControllerLeaseRecoveryService", program);
+    }
+
+    [Fact]
     public void EndpointGroupFilesExist()
     {
         var repoRoot = FindRepoRoot();
@@ -39,7 +49,18 @@ public sealed class ControllerArchitectureTests
         }
     }
 
-    private static string FindRepoRoot()
+
+    [Fact]
+    public void ProgramAcquiresSingleInstanceGuardBeforeStartup()
+    {
+        var repoRoot = FindRepoRoot();
+        var program = File.ReadAllText(Path.Combine(repoRoot, "src", "RenderFarm.Controller.Api", "Program.cs"));
+        var guard = File.ReadAllText(Path.Combine(repoRoot, "src", "RenderFarm.Controller.Api", "ControllerSingleInstanceGuard.cs"));
+
+        Assert.Contains("ControllerSingleInstanceGuard.TryAcquire", program);
+        Assert.Contains("Environment.ExitCode = 2", program);
+        Assert.Contains("new Mutex", guard);
+    }    private static string FindRepoRoot()
     {
         var directory = new DirectoryInfo(AppContext.BaseDirectory);
         while (directory is not null)
@@ -55,3 +76,4 @@ public sealed class ControllerArchitectureTests
         throw new InvalidOperationException("Could not find repository root containing RenderFarm.sln.");
     }
 }
+

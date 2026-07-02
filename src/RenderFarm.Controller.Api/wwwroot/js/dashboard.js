@@ -1,5 +1,5 @@
 import { getJson, sendJson, post, del, getStoredApiToken, setStoredApiToken } from './api.js';
-import { state, setSnapshot, setActivities, setDiagnostics, workers, projects, profiles, jobs, diagnostics } from './state.js';
+import { state, setSnapshot, setActivities, setDiagnostics, setRenderDefaults, workers, projects, profiles, jobs, diagnostics, renderDefaults } from './state.js';
 import { badge, byId, className, clearError, escapeHtml, formatDate, formatRelative, renderAll, renderJobs, renderLoading, renderSelects, renderWorkers, setBusy, showError, toast } from './render.js';
 
 const compatibilityEndpoints = [
@@ -15,6 +15,7 @@ const refreshIntervalMs = 8000;
 let refreshInFlight = false;
 let activeJobDetailsRequest = 0;
 let newRenderStep = 1;
+let pendingConfirmation = null;
 
 function setJobDrawerOpen(isOpen) {
   const drawer = byId('jobDrawer');
@@ -46,7 +47,7 @@ async function refresh({ rescan = false, quiet = false } = {}) {
       await post('/api/workers/rescan');
     }
 
-    const [snapshot, recentActivity, diagnosticSnapshot] = await Promise.all([
+    const [snapshot, recentActivity, diagnosticSnapshot, renderDefaultsSnapshot] = await Promise.all([
       getJson('/api/dashboard'),
       getJson('/api/activity/recent?limit=100').catch(error => {
         console.warn('Activity feed unavailable', error);
@@ -55,11 +56,17 @@ async function refresh({ rescan = false, quiet = false } = {}) {
       getJson('/api/diagnostics').catch(error => {
         console.warn('Diagnostics unavailable', error);
         return null;
+      }),
+      getJson('/api/settings/render-defaults').catch(error => {
+        console.warn('Render defaults unavailable', error);
+        return null;
       })
     ]);
     setSnapshot(snapshot);
     setActivities(recentActivity);
     setDiagnostics(diagnosticSnapshot);
+    setRenderDefaults(renderDefaultsSnapshot);
+    populateRenderDefaultsForm();
     const newActivityCount = notifyActivityChanges(recentActivity);
     notifySnapshotChanges(snapshot, previousJobs, previousApprovals, newActivityCount > 0);
     clearError();
@@ -102,6 +109,7 @@ function notifyActivityChanges(recentActivity) {
 
   return fresh.length;
 }
+
 function notifySnapshotChanges(snapshot, previousJobs, previousApprovals, suppressToast = false) {
   if (!state.notificationsPrimed) {
     state.notificationsPrimed = true;
@@ -148,6 +156,31 @@ function switchView(view) {
 
 function formData(form) {
   return Object.fromEntries(new FormData(form).entries());
+}
+
+function populateRenderDefaultsForm() {
+  const form = byId('renderDefaultsForm');
+  if (!form || form.matches(':focus-within')) return;
+  const defaults = renderDefaults() || {};
+  form.elements.unrealExecutablePath.value = defaults.unrealExecutablePath || '';
+  form.elements.unrealSearchRoot.value = defaults.unrealSearchRoot || '';
+  form.elements.sharedOutputRoot.value = defaults.sharedOutputRoot || '';
+  form.elements.outputSubfolderPattern.value = defaults.outputSubfolderPattern || '{JobId}';
+}
+
+async function saveRenderDefaults(event) {
+  event.preventDefault();
+  const data = formData(event.target);
+  const saved = await sendJson('/api/settings/render-defaults', 'PUT', {
+    unrealExecutablePath: data.unrealExecutablePath || null,
+    unrealSearchRoot: data.unrealSearchRoot || null,
+    sharedOutputRoot: data.sharedOutputRoot || null,
+    outputSubfolderPattern: data.outputSubfolderPattern || '{JobId}'
+  });
+  setRenderDefaults(saved);
+  populateRenderDefaultsForm();
+  toast('Controller render defaults saved', 'success');
+  await refresh({ quiet: true });
 }
 
 function workerById(workerId) {
@@ -208,6 +241,206 @@ function renderType(value) {
     commandtemplate: 'CommandTemplate',
     manual: 'Manual'
   }[key] || 'MrqQueue';
+}
+
+const unrealPathKind = {
+  world: 'WorldPackagePath',
+  sequence: 'LevelSequenceObjectPath',
+  config: 'MoviePipelineConfigObjectPath',
+  queue: 'MoviePipelineQueueObjectPath'
+};
+
+function isSimpleMapUrl(value) {
+  return /^[A-Za-z0-9_-]+$/.test(String(value || ''));
+}
+
+function normalizeModeKey(value) {
+  return String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+function isSingleSequenceModeValue(value) {
+  return ['single', 'singlesequence', 'sequence', 'levelsequence', 'config', 'configpreset', 'sequenceconfig', 'singlelevelsequence'].includes(normalizeModeKey(value));
+}
+
+function isQueueModeValue(value) {
+  return ['queue', 'savedqueue', 'queuepreset', 'mrqqueue', 'moviepipelinequeue'].includes(normalizeModeKey(value));
+}
+
+function movieRenderMode(profile) {
+  const explicit = profileSetting(profile, 'mrqMode') || profileSetting(profile, 'renderMode') || profileSetting(profile, 'movieRenderMode') || profileSetting(profile, 'moviePipelineMode') || profileSetting(profile, 'launchMode');
+  if (isSingleSequenceModeValue(explicit)) return 'single';
+  if (isQueueModeValue(explicit)) return 'queue';
+
+  const sequence = profileSetting(profile, 'sequence') || profileSetting(profile, 'levelSequence');
+  return sequence ? 'single' : 'queue';
+}
+
+function normalizeUnrealReference(raw, expectedKind) {
+  const original = String(raw || '').trim();
+  if (!original) return { ok: false, value: '', warnings: [], error: 'Path is required.' };
+
+  let value = original.replace(/^"|"$/g, '').trim();
+  const warnings = [];
+
+  const wrapped = value.match(/^[A-Za-z0-9_]+\s*'([^']+)'$/);
+  if (wrapped) {
+    value = wrapped[1];
+    warnings.push('Removed the copied Unreal reference wrapper.');
+  }
+
+  const uasset = value.replace(/\\/g, '/').match(/\/Content\/(.+)\.uasset$/i);
+  if (uasset) {
+    value = `/Game/${uasset[1]}`;
+    warnings.push('Converted a .uasset filesystem path to an Unreal /Game path.');
+  }
+
+  value = value.replace(/\\/g, '/').trim();
+  if (value.includes('/Content/') || value.toLowerCase().startsWith('content/')) {
+    return { ok: false, value, warnings, error: 'Use Unreal mount paths such as /Game/RenderConfig.RenderConfig; do not include /Content/.' };
+  }
+
+  if (/^game\//i.test(value)) {
+    value = `/${value}`;
+    warnings.push('Added the missing leading slash.');
+  }
+
+  if (expectedKind === unrealPathKind.world && isSimpleMapUrl(value)) {
+    if (value !== original) warnings.push(`Normalised to ${value}.`);
+    return { ok: true, value, warnings: [...new Set(warnings)], error: '' };
+  }
+
+  if (!/^\/[A-Za-z0-9_]+\/.+/.test(value)) {
+    return { ok: false, value, warnings, error: 'Asset paths must start with /Game/ or another Unreal mount point such as /PluginName/, or be a simple map name such as Minimal_Default1 when used in the map slot.' };
+  }
+
+  const lastSlash = value.lastIndexOf('/');
+  const leaf = value.slice(lastSlash + 1);
+  if (expectedKind === unrealPathKind.world) {
+    const dot = value.indexOf('.', Math.max(0, lastSlash));
+    if (dot > lastSlash) {
+      value = value.slice(0, dot);
+      warnings.push('Converted the map object path to a world package path.');
+    }
+  } else if (expectedKind !== unrealPathKind.queue && !leaf.includes('.')) {
+    value = `${value}.${leaf}`;
+    warnings.push('Appended the object name to the package path.');
+  }
+
+  if (value !== original) warnings.push(`Normalised to ${value}.`);
+  return { ok: true, value, warnings: [...new Set(warnings)], error: '' };
+}
+
+function profileSetting(profile, key) {
+  const settings = profile?.settings || {};
+  const exact = settings[key];
+  if (exact != null) return exact;
+  const match = Object.keys(settings).find(item => item.toLowerCase() === key.toLowerCase());
+  return match ? settings[match] : '';
+}
+
+function activeWizardProfileCandidate() {
+  const form = wizardForm();
+  if (wizardMode('wizardProfileMode') === 'new') {
+    return {
+      type: form.elements.newProfileType.value,
+      assetPath: form.elements.newProfileAsset.value,
+      commandTemplate: form.elements.newProfileCommandTemplate.value,
+      settings: {
+        map: form.elements.newProfileMap.value,
+        sequence: form.elements.newProfileSequence?.value || '',
+        mrqMode: form.elements.newProfileMrqMode?.value || 'Queue',
+        extraArgs: form.elements.newProfileExtraArgs.value,
+        defaultOutputRoot: form.elements.newProfileDefaultOutputRoot?.value || '',
+        unrealExecutablePath: form.elements.newProfileUnrealExecutablePath?.value || '',
+        outputSubfolderPattern: form.elements.newProfileOutputSubfolderPattern?.value || ''
+      }
+    };
+  }
+
+  return selectedWizardProfile() || null;
+}
+
+function validateProfilePaths(profile) {
+  if (!profile) return { blockers: ['Choose a render setup before starting the render.'], warnings: [], normalized: {} };
+  const type = renderType(profile.type);
+  const blockers = [];
+  const warnings = [];
+  const normalized = {};
+  const map = profileSetting(profile, 'map') || profileSetting(profile, 'mapName') || profileSetting(profile, 'level') || profileSetting(profile, 'levelName');
+  const sequence = profileSetting(profile, 'sequence') || profileSetting(profile, 'levelSequence');
+  const asset = profile.assetPath || profileSetting(profile, 'moviePipelineConfig') || profileSetting(profile, 'mrqConfig') || profileSetting(profile, 'queue');
+  const mode = movieRenderMode(profile);
+
+  if (type === 'CommandTemplate') {
+    if (!String(profile.commandTemplate || '').trim()) blockers.push('Command/template mode requires a command template.');
+    return { blockers, warnings, normalized };
+  }
+
+  if (type !== 'MrqQueue' && type !== 'MrgGraph') {
+    return { blockers, warnings, normalized };
+  }
+
+  const mapResult = normalizeUnrealReference(map, unrealPathKind.world);
+  if (!mapResult.ok) blockers.push(`Map/world path: ${mapResult.error}`); else { normalized.map = mapResult.value; warnings.push(...mapResult.warnings); }
+
+  if (mode === 'single') {
+    const sequenceResult = normalizeUnrealReference(sequence, unrealPathKind.sequence);
+    if (!sequenceResult.ok) blockers.push(`Level Sequence path: ${sequenceResult.error}`); else { normalized.sequence = sequenceResult.value; warnings.push(...sequenceResult.warnings); }
+  } else if (sequence && isQueueModeValue(profileSetting(profile, 'mrqMode') || profileSetting(profile, 'renderMode') || profileSetting(profile, 'movieRenderMode'))) {
+    blockers.push('Saved MRQ Queue mode should not set a separate Level Sequence. Remove the sequence field, or switch to Single Level Sequence + config preset mode.');
+  }
+
+  const configResult = normalizeUnrealReference(asset, mode === 'single' ? unrealPathKind.config : unrealPathKind.queue);
+  if (!configResult.ok) blockers.push(`Movie Pipeline config/queue: ${configResult.error}`); else { normalized.asset = configResult.value; warnings.push(...configResult.warnings); }
+
+  return { blockers, warnings: [...new Set(warnings)], normalized };
+}
+
+function applyWizardPathNormalisation(target = null) {
+  const form = wizardForm();
+  if (!form || wizardMode('wizardProfileMode') !== 'new') return;
+  const mode = form.elements.newProfileMrqMode?.value === 'SingleSequence' ? 'single' : 'queue';
+  const fields = [
+    [form.elements.newProfileMap, unrealPathKind.world],
+    [form.elements.newProfileSequence, unrealPathKind.sequence],
+    [form.elements.newProfileAsset, mode === 'single' ? unrealPathKind.config : unrealPathKind.queue]
+  ].filter(([field]) => field && (!target || field === target));
+
+  const warnings = [];
+  for (const [field, kind] of fields) {
+    if (!field.value.trim()) continue;
+    const result = normalizeUnrealReference(field.value, kind);
+    if (result.ok && result.value !== field.value.trim()) {
+      field.value = result.value;
+      warnings.push(...result.warnings);
+    }
+  }
+
+  if (warnings.length) toast([...new Set(warnings)].join(' '), 'info');
+}
+
+function shellQuote(value) {
+  const textValue = String(value || '');
+  return textValue.includes(' ') || textValue.includes('"') ? `"${textValue.replace(/"/g, '\\"')}"` : textValue;
+}
+
+function buildWizardCommandPreview() {
+  const form = wizardForm();
+  const profile = activeWizardProfileCandidate();
+  const validation = validateProfilePaths(profile);
+  if (validation.blockers.length) return { ok: false, command: '', warnings: validation.warnings, error: validation.blockers[0] };
+
+  const defaults = renderDefaults() || {};
+  const project = selectedWizardProject();
+  const projectPath = wizardMode('wizardProjectMode') === 'new' ? form.elements.newProjectPath.value.trim() : project?.uProjectPath || '<Project.uproject>';
+  const unrealExe = profileSetting(profile, 'unrealExecutablePath') || defaults.unrealExecutablePath || '<UnrealEditor-Cmd.exe>';
+  const args = [shellQuote(unrealExe), shellQuote(projectPath), shellQuote(validation.normalized.map), '-game'];
+  if (validation.normalized.sequence) args.push(`-LevelSequence="${validation.normalized.sequence.replace(/"/g, '\\"')}"`);
+  args.push(`-MoviePipelineConfig="${validation.normalized.asset.replace(/"/g, '\\"')}"`);
+  args.push('-windowed', '-Log', '-StdOut', '-allowStdOutLogVerbosity', '-Unattended');
+  const extraArgs = profileSetting(profile, 'extraArgs');
+  if (extraArgs) args.push(extraArgs);
+  return { ok: true, command: args.join(' '), warnings: validation.warnings, error: '' };
 }
 
 function projectDtoFromLegacy(project) {
@@ -305,6 +538,32 @@ function openModal(id) {
   }
 }
 
+function confirmAction({ title, message, details = '', confirmLabel = 'Continue', tone = 'danger' }) {
+  const modal = byId('confirmActionModal');
+  if (!modal) return Promise.resolve(false);
+  byId('confirmActionTitle').textContent = title || 'Confirm action';
+  byId('confirmActionMessage').textContent = message || 'Review the action before continuing.';
+  byId('confirmActionDetails').textContent = details || '';
+  const proceed = byId('confirmActionProceed');
+  proceed.textContent = confirmLabel || 'Continue';
+  proceed.classList.toggle('danger', tone !== 'primary');
+  proceed.classList.toggle('primary', tone === 'primary');
+  return new Promise(resolve => {
+    pendingConfirmation = resolve;
+    if (typeof modal.showModal === 'function' && !modal.open) modal.showModal(); else modal.classList.add('is-open');
+  });
+}
+
+function resolveConfirmation(result) {
+  const modal = byId('confirmActionModal');
+  if (typeof modal?.close === 'function' && modal.open) modal.close();
+  modal?.classList.remove('is-open');
+  if (pendingConfirmation) {
+    const resolve = pendingConfirmation;
+    pendingConfirmation = null;
+    resolve(result);
+  }
+}
 function closeModal(id) {
   const modal = byId(id);
   if (!modal) return;
@@ -337,6 +596,7 @@ function openJobModalForProfile(profileId = '') {
   }
   openModal('jobModal');
 }
+
 function wizardForm() {
   return byId('newRenderForm');
 }
@@ -462,12 +722,16 @@ function updateWizardRenderFields() {
   const type = wizardForm().elements.newProfileType?.value || 'MrqQueue';
   const customCommand = type === 'CommandTemplate';
   const usesAsset = type === 'MrqQueue' || type === 'MrgGraph';
+  const singleSequence = wizardForm().elements.newProfileMrqMode?.value === 'SingleSequence';
   document.querySelectorAll('[data-wizard-command-field]').forEach(element => element.classList.toggle('hidden', !customCommand));
   document.querySelectorAll('[data-wizard-asset-field]').forEach(element => element.classList.toggle('hidden', !usesAsset));
+  document.querySelectorAll('[data-wizard-mrq-mode-field]').forEach(element => element.classList.toggle('hidden', !usesAsset));
+  document.querySelectorAll('[data-wizard-sequence-field]').forEach(element => element.classList.toggle('hidden', !usesAsset || !singleSequence));
 }
 
 function collectOutputRoots() {
-  return workers().flatMap(worker => (worker.capabilities?.sharedOutputRoots || []).map(root => ({
+  const defaults = renderDefaults() || {};
+  const roots = workers().flatMap(worker => (worker.capabilities?.sharedOutputRoots || []).map(root => ({
     workerId: worker.id,
     workerName: worker.name || worker.id,
     approved: className(worker.approval || 'accepted') === 'accepted',
@@ -475,6 +739,21 @@ function collectOutputRoots() {
     mode: className(worker.schedulingMode || 'active'),
     ...root
   })));
+  if (defaults.sharedOutputRoot) {
+    roots.unshift({
+      workerId: 'controller',
+      workerName: 'Controller default',
+      approved: true,
+      status: 'controller',
+      mode: 'active',
+      path: defaults.sharedOutputRoot,
+      exists: true,
+      writable: true,
+      message: 'Controller-owned output root; each worker validates access when it receives a job.'
+    });
+  }
+
+  return roots;
 }
 
 function collectWizardReadiness() {
@@ -492,8 +771,8 @@ function collectWizardReadiness() {
   if (!workers().length) warnings.push('No workers connected yet. Start a worker machine to make it appear here.');
   if (!approvedWorkers.length) warnings.push('No approved workers are available for scheduling.');
   if (!onlineWorkers.length) warnings.push(busyWorkers.length ? 'Workers are connected, but all approved workers are currently busy.' : 'No approved worker is currently idle or online.');
-  if (!writableRoots.length) warnings.push('No validated shared output location yet. Start a worker and confirm its output root.');
-  if (!wizardForm().elements.outputDirectory.value.trim()) warnings.push('No output location has been selected. The worker will use its configured default if the backend allows it.');
+  if (!writableRoots.length) warnings.push('Configure a controller output default or start a worker and confirm its output root.');
+  if (!wizardForm().elements.outputDirectory.value.trim()) warnings.push('No output location has been selected. The controller will apply the saved render default when available.');
 
   return { roots, approvedWorkers, onlineWorkers, busyWorkers, writableRoots, warnings };
 }
@@ -506,7 +785,7 @@ function updateWizardReadiness() {
   const outputCards = readiness.writableRoots.slice(0, 4).map(root => `
     <article class="readiness-card good">
       <div class="item-head"><div class="item-title">${escapeHtml(root.path)}</div>${badge('Writable')}</div>
-      <div class="meta">Worker ${escapeHtml(root.workerName)} | ${escapeHtml(root.freeDiskGb) || '-'} GB free</div>
+      <div class="meta">${escapeHtml(root.workerName)} | ${escapeHtml(root.freeDiskGb) || '-'} GB free</div>
       <button class="button" type="button" data-copy="${escapeHtml(root.path)}" data-copy-label="output path">Copy path</button>
     </article>
   `).join('');
@@ -518,8 +797,30 @@ function updateWizardReadiness() {
       <div><span>Writable outputs</span><strong>${escapeHtml(readiness.writableRoots.length)}</strong></div>
     </div>
     ${selectedOutput ? `<div class="selected-output"><span>Selected output</span><code>${escapeHtml(selectedOutput)}</code></div>` : ''}
-    ${readiness.warnings.length ? `<div class="wizard-warning">${readiness.warnings.map(warning => `<p>${escapeHtml(warning)}</p>`).join('')}</div>` : '<div class="callout">At least one approved worker has reported a writable output root.</div>'}
-    <div class="readiness-grid">${outputCards || '<div class="empty">No validated shared output location yet. Start a worker and confirm its output root.</div>'}</div>
+    ${readiness.warnings.length ? `<div class="wizard-warning">${readiness.warnings.map(warning => `<p>${escapeHtml(warning)}</p>`).join('')}</div>` : '<div class="callout">Controller-owned scheduling will choose an eligible worker when the job is queued.</div>'}
+    <div class="readiness-grid">${outputCards || '<div class="empty">No worker output telemetry yet. A controller output default or explicit output folder can still be used.</div>'}</div>
+  `;
+  renderWizardPathValidation();
+}
+
+function renderWizardPathValidation() {
+  const target = byId('newRenderPathValidation');
+  if (!target) return;
+  const profile = activeWizardProfileCandidate();
+  const validation = validateProfilePaths(profile);
+  const preview = buildWizardCommandPreview();
+  const output = wizardForm().elements.outputDirectory.value.trim() || renderDefaults()?.sharedOutputRoot || profileSetting(profile, 'defaultOutputRoot') || profileSetting(profile, 'outputRoot') || '';
+  const outputBlocker = output ? '' : 'Output directory is required. Enter an output folder or configure Controller Render Defaults.';
+  const blockers = [...validation.blockers, ...(outputBlocker ? [outputBlocker] : [])];
+  const warnings = [...new Set([...validation.warnings, ...preview.warnings])];
+
+  target.innerHTML = `
+    ${blockers.length ? `<div class="wizard-warning error-tone">${blockers.map(item => `<p>${escapeHtml(item)}</p>`).join('')}</div>` : '<div class="callout">Launch validation is clear. The controller will re-check paths before queueing.</div>'}
+    ${warnings.length ? `<div class="wizard-warning">${warnings.map(item => `<p>${escapeHtml(item)}</p>`).join('')}</div>` : ''}
+    <details class="command-preview" ${preview.ok ? 'open' : ''}>
+      <summary>Command preview</summary>
+      ${preview.ok ? `<code>${escapeHtml(preview.command)}</code><button class="button" type="button" data-copy="${escapeHtml(preview.command)}" data-copy-label="command preview">Copy command</button>` : `<div class="meta">${escapeHtml(preview.error || 'Complete the render setup to generate the command.')}</div>`}
+    </details>
   `;
 }
 
@@ -528,20 +829,27 @@ function renderWizardReview() {
   if (!target) return;
   const form = wizardForm();
   const project = selectedWizardProject();
-  const profile = selectedWizardProfile();
+  const profile = activeWizardProfileCandidate();
   const readiness = collectWizardReadiness();
+  const validation = validateProfilePaths(profile);
+  const preview = buildWizardCommandPreview();
   const projectName = wizardMode('wizardProjectMode') === 'new' ? form.elements.newProjectName.value || 'New project' : project?.displayName || selectedWizardProjectId() || 'No project selected';
-  const profileName = wizardMode('wizardProfileMode') === 'new' ? form.elements.newProfileName.value || 'New render setup' : profile?.displayName || selectedWizardProfileId() || 'No render setup selected';
-  const profileType = wizardMode('wizardProfileMode') === 'new' ? form.elements.newProfileType.value : profile?.type || '-';
+  const profileName = wizardMode('wizardProfileMode') === 'new' ? form.elements.newProfileName.value || 'New render setup' : selectedWizardProfile()?.displayName || selectedWizardProfileId() || 'No render setup selected';
+  const profileType = renderType(profile?.type);
   const jobName = form.elements.jobName.value || `${profileName} render`;
-  const output = form.elements.outputDirectory.value || 'Worker/controller default';
+  const output = form.elements.outputDirectory.value || renderDefaults()?.sharedOutputRoot || profileSetting(profile, 'defaultOutputRoot') || 'Output must be supplied before launch';
+  const blockers = [...validation.blockers];
+  if (!form.elements.outputDirectory.value.trim() && !renderDefaults()?.sharedOutputRoot && !profileSetting(profile, 'defaultOutputRoot')) {
+    blockers.push('Output directory is required.');
+  }
 
   target.innerHTML = `
     <article class="review-card"><span>Project</span><strong>${escapeHtml(projectName)}</strong><p>${escapeHtml(wizardMode('wizardProjectMode') === 'new' ? 'Will be registered before queueing.' : 'Saved project')}</p></article>
-    <article class="review-card"><span>Render Setup</span><strong>${escapeHtml(profileName)}</strong><p>${escapeHtml(profileType)}</p></article>
-    <article class="review-card"><span>Output Location</span><strong>${escapeHtml(output)}</strong><p>${escapeHtml(readiness.writableRoots.length ? `${readiness.writableRoots.length} writable root(s) reported` : 'No writable output root reported')}</p></article>
+    <article class="review-card"><span>Render setup</span><strong>${escapeHtml(profileName)}</strong><p>${escapeHtml(profileType)}</p></article>
+    <article class="review-card"><span>Output location</span><strong>${escapeHtml(output)}</strong><p>${escapeHtml(readiness.writableRoots.length ? `${readiness.writableRoots.length} writable root(s) reported` : 'Worker access is validated at assignment time.')}</p></article>
     <article class="review-card"><span>Queue</span><strong>${escapeHtml(jobName)}</strong><p>Priority ${escapeHtml(form.elements.priority.value || 0)}</p></article>
-    <article class="review-card full"><span>Worker Readiness</span><strong>${escapeHtml(readiness.onlineWorkers.length)} ready / ${escapeHtml(readiness.approvedWorkers.length)} approved</strong><p>${escapeHtml(readiness.warnings.join(' ') || 'No readiness warnings reported.')}</p></article>
+    <article class="review-card full"><span>Launch validation</span><strong>${blockers.length ? 'Blocked' : 'Ready to submit'}</strong><p>${escapeHtml(blockers.join(' ') || [...new Set([...validation.warnings, ...preview.warnings])].join(' ') || 'No launch blockers found.')}</p></article>
+    <article class="review-card full command-review"><span>Command preview</span>${preview.ok ? `<details class="command-preview" open><summary>Generated Unreal command</summary><code>${escapeHtml(preview.command)}</code><button class="button" type="button" data-copy="${escapeHtml(preview.command)}" data-copy-label="command preview">Copy command</button></details>` : `<p>${escapeHtml(preview.error || 'Complete render setup to generate the command.')}</p>`}</article>
   `;
 }
 
@@ -558,8 +866,9 @@ function setNewRenderStep(step) {
   byId('newRenderBackBtn').classList.toggle('hidden', newRenderStep === 1);
   byId('newRenderNextBtn').classList.toggle('hidden', newRenderStep === 4);
   byId('newRenderQueueBtn').classList.toggle('hidden', newRenderStep !== 4);
-  if (newRenderStep === 3) updateWizardReadiness();
-  if (newRenderStep === 4) renderWizardReview();
+  updateWizardReadiness();
+  renderWizardReview();
+  byId('newRenderQueueBtn').disabled = Boolean(validateWizardStep(1) || validateWizardStep(2) || validateWizardStep(3));
 }
 
 function showWizardError(message, step = null) {
@@ -573,7 +882,10 @@ function validateWizardStep(step) {
   const form = wizardForm();
   if (step === 1) {
     if (wizardMode('wizardProjectMode') === 'existing') {
+      const project = selectedWizardProject();
       if (!selectedWizardProjectId()) return 'Choose an existing project or add a new project.';
+      if (!String(project?.uProjectPath || '').trim()) return 'Project .uproject path is required before starting a render.';
+      if (!/\.uproject$/i.test(project.uProjectPath)) return 'Project path should point to a .uproject file.';
       return '';
     }
 
@@ -589,16 +901,24 @@ function validateWizardStep(step) {
   if (step === 2) {
     if (wizardMode('wizardProfileMode') === 'existing') {
       if (!selectedWizardProfileId()) return 'Choose an existing render setup or add a new setup.';
-      return '';
+    } else {
+      const name = form.elements.newProfileName.value.trim();
+      const id = slug(form.elements.newProfileId.value || name || `${selectedWizardProjectId()}-render-setup`);
+      if (!name) return 'Enter a render setup name.';
+      if (profiles().some(profile => className(profile.id) === className(id))) return `Render setup ID "${id}" already exists. Choose a different ID.`;
+      if (form.elements.newProfileType.value === 'CommandTemplate' && !form.elements.newProfileCommandTemplate.value.trim()) {
+        return 'Enter a command template for custom command/template mode.';
+      }
     }
 
-    const name = form.elements.newProfileName.value.trim();
-    const id = slug(form.elements.newProfileId.value || name || `${selectedWizardProjectId()}-render-setup`);
-    if (!name) return 'Enter a render setup name.';
-    if (profiles().some(profile => className(profile.id) === className(id))) return `Render setup ID "${id}" already exists. Choose a different ID.`;
-    if (form.elements.newProfileType.value === 'CommandTemplate' && !form.elements.newProfileCommandTemplate.value.trim()) {
-      return 'Enter a command template for custom command/template mode.';
-    }
+    const validation = validateProfilePaths(activeWizardProfileCandidate());
+    if (validation.blockers.length) return validation.blockers[0];
+  }
+
+  if (step === 3) {
+    const profile = activeWizardProfileCandidate();
+    const output = form.elements.outputDirectory.value.trim() || renderDefaults()?.sharedOutputRoot || profileSetting(profile, 'defaultOutputRoot') || profileSetting(profile, 'outputRoot');
+    if (!output) return 'Enter an output directory or configure Controller Render Defaults before starting a render.';
   }
 
   return '';
@@ -641,15 +961,29 @@ function projectDtoFromWizard() {
 function profileDtoFromWizard(projectId) {
   const form = wizardForm();
   const settings = {};
-  addOptionalSetting(settings, 'map', form.elements.newProfileMap.value);
+  const type = form.elements.newProfileType.value;
+  const mrqMode = form.elements.newProfileMrqMode?.value || 'Queue';
+  const isSingleSequence = mrqMode === 'SingleSequence';
+  const sequenceRaw = form.elements.newProfileSequence?.value || '';
+  const mapResult = form.elements.newProfileMap.value.trim() ? normalizeUnrealReference(form.elements.newProfileMap.value, unrealPathKind.world) : null;
+  const sequenceResult = sequenceRaw.trim() ? normalizeUnrealReference(sequenceRaw, unrealPathKind.sequence) : null;
+  const assetKind = isSingleSequence ? unrealPathKind.config : unrealPathKind.queue;
+  const assetResult = form.elements.newProfileAsset.value.trim() ? normalizeUnrealReference(form.elements.newProfileAsset.value, assetKind) : null;
+
+  addOptionalSetting(settings, 'map', mapResult?.ok ? mapResult.value : form.elements.newProfileMap.value);
+  if (isSingleSequence) addOptionalSetting(settings, 'sequence', sequenceResult?.ok ? sequenceResult.value : sequenceRaw);
+  addOptionalSetting(settings, 'mrqMode', mrqMode);
   addOptionalSetting(settings, 'extraArgs', form.elements.newProfileExtraArgs.value);
+  addOptionalSetting(settings, 'defaultOutputRoot', form.elements.newProfileDefaultOutputRoot?.value);
+  addOptionalSetting(settings, 'unrealExecutablePath', form.elements.newProfileUnrealExecutablePath?.value);
+  addOptionalSetting(settings, 'outputSubfolderPattern', form.elements.newProfileOutputSubfolderPattern?.value);
 
   return {
     id: slug(form.elements.newProfileId.value || form.elements.newProfileName.value || `${projectId}-render-setup`),
     projectId,
     displayName: form.elements.newProfileName.value.trim(),
-    type: form.elements.newProfileType.value,
-    assetPath: form.elements.newProfileAsset.value.trim() || null,
+    type,
+    assetPath: assetResult?.ok ? assetResult.value : (form.elements.newProfileAsset.value.trim() || null),
     commandTemplate: form.elements.newProfileCommandTemplate.value.trim() || null,
     defaultOutputType: 'png',
     supportsChunking: false,
@@ -659,6 +993,7 @@ function profileDtoFromWizard(projectId) {
 
 async function submitNewRenderWizard(event) {
   event.preventDefault();
+  applyWizardPathNormalisation();
   if (!validateWizardThrough(3)) return;
 
   setBusy(true);
@@ -686,15 +1021,15 @@ async function submitNewRenderWizard(event) {
       outputDirectory: form.elements.outputDirectory.value.trim() || null
     });
 
-    toast('Render queued', 'success');
+    toast('Render submitted', 'success');
     form.reset();
     closeModal('newRenderModal');
     switchView('queue');
     await refresh();
     if (job?.id) await openJobDetails(job.id);
   } catch (error) {
-    showWizardError(error.message || 'Unable to queue render.');
-    toast(error.message || 'Unable to queue render.', 'error');
+    showWizardError(error.message || 'Unable to submit render.');
+    toast(error.message || 'Unable to submit render.', 'error');
   } finally {
     setBusy(false);
   }
@@ -712,6 +1047,11 @@ async function openJobDetails(jobId) {
   byId('jobDrawerAttempts').innerHTML = '<div class="skeleton"></div>';
   byId('jobDrawerEvents').innerHTML = '<div class="skeleton"></div>';
   byId('jobDrawerArtifacts').innerHTML = '<div class="skeleton"></div>';
+  byId('jobDrawerCommand').innerHTML = '<div class="skeleton"></div>';
+  byId('jobDrawerValidation').innerHTML = '<div class="skeleton"></div>';
+  byId('jobDrawerWarnings').innerHTML = '<div class="skeleton"></div>';
+  byId('jobDrawerLogDiagnostics').innerHTML = '<div class="skeleton"></div>';
+  byId('jobDrawerRawLog').innerHTML = '<div class="skeleton"></div>';
 
   try {
     const [job, attempts, events] = await Promise.all([
@@ -728,6 +1068,11 @@ async function openJobDetails(jobId) {
     byId('jobDrawerAttempts').innerHTML = '';
     byId('jobDrawerEvents').innerHTML = '';
     byId('jobDrawerArtifacts').innerHTML = '';
+    byId('jobDrawerCommand').innerHTML = '';
+    byId('jobDrawerValidation').innerHTML = '';
+    byId('jobDrawerWarnings').innerHTML = '';
+    byId('jobDrawerLogDiagnostics').innerHTML = '';
+    byId('jobDrawerRawLog').innerHTML = '';
   }
 }
 
@@ -739,6 +1084,87 @@ function closeJobDrawer(event) {
   state.selectedJobId = null;
   setJobDrawerOpen(false);
   byId('closeJobDrawer').blur();
+}
+
+function parseJsonOrNull(value) {
+  if (!value) return null;
+  try { return JSON.parse(value); } catch { return null; }
+}
+
+function latestLogClassification(events, failureText = '') {
+  const fromEvent = [...events].reverse()
+    .map(event => parseJsonOrNull(event.dataJson))
+    .find(data => data && (Array.isArray(data.diagnostics) || Array.isArray(data.loadErrors) || data.rawExcerpt));
+  if (fromEvent) return fromEvent;
+  return classifyLogTextClient(failureText);
+}
+
+function classifyLogTextClient(text) {
+  const raw = String(text || '');
+  const diagnostics = [];
+  const push = (code, severity, message, evidence, fix) => diagnostics.push({ code, severity, message, evidence, fix });
+  if (/Failed to find Pipeline Configuration asset to render/i.test(raw)) push('mrq-config-not-found', 'error', 'MRQ config/queue preset was not found. Use a saved asset path like /Game/RenderConfig.RenderConfig and make sure the asset exists.', 'Failed to find Pipeline Configuration asset to render', 'Save the config or queue preset in Unreal and paste the object path without /Content.');
+  if (/\/Content\/ part of the on-disk structure should be omitted/i.test(raw)) push('content-path-in-asset-reference', 'error', 'Remove /Content from Unreal asset paths. Content/Render/MyPreset.uasset becomes /Game/Render/MyPreset.MyPreset.', '/Content path warning', 'Use /Game object paths, not filesystem Content paths.');
+  if (/RLPlugin is Incompatible/i.test(raw)) push('rlplugin-incompatible', 'warning', 'Plugin built for an older Unreal version. Disable/rebuild/update it before command-line rendering if it is required.', 'RLPlugin is Incompatible', 'Update or disable the plugin on render workers.');
+  if (/DatasmithContent\/Materials\/C4DMaster/i.test(raw)) push('datasmith-c4d-material-missing', 'warning', 'Datasmith/C4D material dependency is missing. Enable/install Datasmith Content or repair/reimport affected materials.', 'DatasmithContent/Materials/C4DMaster', 'Enable Datasmith Content or repair affected imported materials.');
+  const config = raw.match(/MoviePipelineConfig\s*=\s*([^\s"']+|"[^"]+"|'[^']+')/i)?.[1]?.replace(/^['"]|['"]$/g, '') || null;
+  if (config) push('movie-pipeline-config-value', 'info', `Unreal received MoviePipelineConfig=${config}.`, `MoviePipelineConfig=${config}`, 'Compare this with the saved render setup asset path.');
+  const loadErrors = raw.includes('LoadErrors:') ? raw.split(/\r?\n/).filter(line => /LoadErrors:|Missing|Error|Warning/i.test(line)).slice(0, 20) : [];
+  if (loadErrors.length) push('load-errors', 'warning', 'Unreal reported load errors. Review the grouped load errors before retrying the render.', loadErrors.slice(0, 6).join('\n'), 'Open the project in Unreal and resolve missing assets, classes, plugins, or redirectors.');
+  return { diagnostics, loadErrors, moviePipelineConfigValue: config, rawExcerpt: raw || null };
+}
+
+function renderJobCommandSection(job, attempts) {
+  const command = [...attempts].reverse().find(attempt => attempt.commandLine)?.commandLine || job.validation?.commandPreview || '';
+  byId('jobDrawerCommand').innerHTML = command
+    ? `<details class="command-preview" open><summary>Command Preview</summary><code>${escapeHtml(command)}</code><button class="button" type="button" data-copy="${escapeHtml(command)}" data-copy-label="command preview">Copy command</button></details>`
+    : '<div class="empty">No command has been generated yet. It will appear after validation or the first worker attempt.</div>';
+}
+
+function renderJobValidationSection(job) {
+  const validation = job.validation;
+  if (!validation) {
+    byId('jobDrawerValidation').innerHTML = '<div class="empty">No validation snapshot is stored for this job. Requeueing or creating a new render will run fast validation.</div>';
+    return;
+  }
+  const issues = validation.issues || [];
+  byId('jobDrawerValidation').innerHTML = `
+    <article class="validation-card ${escapeHtml(className(validation.status))}">
+      <div class="item-head"><div class="item-title">${escapeHtml(validation.summary)}</div>${badge(validation.status)}</div>
+      <div class="meta">${validation.deepValidationRan ? 'Deep validation confirmed Unreal asset checks.' : 'Fast validation only: path format looks valid; asset existence requires deep validation.'}</div>
+      ${validation.commandPreview ? `<details class="command-preview"><summary>Stored command preview</summary><code>${escapeHtml(validation.commandPreview)}</code></details>` : ''}
+    </article>
+    ${issues.length ? issues.map(renderValidationIssue).join('') : '<div class="empty">No validation issues were recorded.</div>'}
+  `;
+}
+
+function renderValidationIssue(issue) {
+  const fix = issue.autoFixAvailable && issue.fixedValue
+    ? `<div class="path-line"><span>Apply auto-fix</span><code>${escapeHtml(issue.fixedValue)}</code><button class="button" type="button" data-copy="${escapeHtml(issue.fixedValue)}" data-copy-label="auto-fix value">Copy fixed value</button></div>`
+    : issue.fix ? `<div class="meta">Fix: ${escapeHtml(issue.fix)}</div>` : '';
+  return `<article class="item validation-issue ${escapeHtml(className(issue.severity))}"><div class="item-head"><div class="item-title">${escapeHtml(issue.field || issue.code)}</div>${badge(issue.severity)}</div><p>${escapeHtml(issue.message)}</p>${issue.originalValue ? `<div class="meta">Original: ${escapeHtml(issue.originalValue)}</div>` : ''}${fix}</article>`;
+}
+
+function renderJobWarningsSection(job, classification) {
+  const warnings = [...(job.validation?.issues || []).filter(issue => className(issue.severity) === 'warning'), ...(classification.diagnostics || []).filter(item => className(item.severity) === 'warning')];
+  byId('jobDrawerWarnings').innerHTML = warnings.length
+    ? warnings.map(item => `<article class="item warning-card"><div class="item-title">${escapeHtml(item.field || item.code || 'Warning')}</div><p>${escapeHtml(item.message)}</p>${item.fix ? `<div class="meta">Fix: ${escapeHtml(item.fix)}</div>` : ''}</article>`).join('')
+    : '<div class="empty">No warnings are currently recorded for this job.</div>';
+}
+
+function renderLogDiagnosticsSection(classification) {
+  const diagnostics = classification.diagnostics || [];
+  byId('jobDrawerLogDiagnostics').innerHTML = diagnostics.length
+    ? diagnostics.map(item => `<article class="item log-diagnostic ${escapeHtml(className(item.severity))}"><div class="item-head"><div class="item-title">${escapeHtml(item.message)}</div>${badge(item.severity)}</div>${item.evidence ? `<pre>${escapeHtml(item.evidence)}</pre>` : ''}${item.fix ? `<div class="meta">Fix: ${escapeHtml(item.fix)}</div>` : ''}</article>`).join('')
+    : '<div class="empty">No known Unreal log signatures have been detected yet.</div>';
+}
+
+function renderRawLogSection(classification, attempts, failureText) {
+  const raw = classification.rawExcerpt || failureText || '';
+  const latestLogPath = [...attempts].reverse().find(attempt => attempt.logFilePath)?.logFilePath || '';
+  byId('jobDrawerRawLog').innerHTML = raw
+    ? `<details class="raw-log"><summary>Raw log excerpt</summary><pre>${escapeHtml(raw)}</pre></details>${latestLogPath ? `<div class="path-line"><span>Worker log path</span><code>${escapeHtml(latestLogPath)}</code><button class="button" type="button" data-copy="${escapeHtml(latestLogPath)}" data-copy-label="log path">Copy log path</button></div>` : ''}`
+    : latestLogPath ? `<div class="path-line"><span>Worker log path</span><code>${escapeHtml(latestLogPath)}</code><button class="button" type="button" data-copy="${escapeHtml(latestLogPath)}" data-copy-label="log path">Copy log path</button></div>` : '<div class="empty">No raw log excerpt has been reported yet.</div>';
 }
 
 function renderJobDrawer(job, attempts = [], events = []) {
@@ -774,7 +1200,7 @@ function renderJobDrawer(job, attempts = [], events = []) {
         <div class="item-head"><div class="item-title">Attempt ${escapeHtml(attempt.attemptNumber)}</div>${badge(attempt.state)}</div>
         <div class="meta">Worker ${escapeHtml(attempt.workerId) || '-'} | Exit ${escapeHtml(attempt.exitCode ?? '-')} | ${escapeHtml(attempt.failureCategory || 'None')}</div>
         <div class="meta">Started ${formatDate(attempt.startedAtUtc)} | Finished ${formatDate(attempt.finishedAtUtc)} | Duration ${escapeHtml(formatDuration(attempt.startedAtUtc, attempt.finishedAtUtc))}</div>
-        ${attempt.commandLine ? `<div class="path-line"><span>Command</span><code>${escapeHtml(attempt.commandLine)}</code><button class="button" type="button" data-copy="${escapeHtml(attempt.commandLine)}" data-copy-label="attempt command">Copy command</button></div>` : ''}
+        ${attempt.commandLine ? `<details class="command-preview" open><summary>Command preview</summary><code>${escapeHtml(attempt.commandLine)}</code><button class="button" type="button" data-copy="${escapeHtml(attempt.commandLine)}" data-copy-label="attempt command">Copy command</button></details>` : ''}
         ${attempt.logFilePath ? `<div class="path-line"><span>Log</span><code>${escapeHtml(attempt.logFilePath)}</code><button class="button" type="button" data-copy="${escapeHtml(attempt.logFilePath)}" data-copy-label="log path">Copy log path</button></div>` : ''}
         ${attemptFailure ? `<div class="failure-box">${escapeHtml(attemptFailure)}<button class="button" type="button" data-copy="${escapeHtml(attemptFailure)}" data-copy-label="attempt failure">Copy failure</button></div>` : ''}
       </article>
@@ -787,6 +1213,12 @@ function renderJobDrawer(job, attempts = [], events = []) {
       <div class="meta">${formatDate(event.createdAtUtc)} | ${escapeHtml(event.failureCategory || 'None')} | Worker ${escapeHtml(event.workerId) || '-'}</div>
     </article>
   `).join('') : '<div class="empty">No events recorded for this job.</div>';
+  const logClassification = latestLogClassification(events, failureText);
+  renderJobCommandSection(job, attempts);
+  renderJobValidationSection(job);
+  renderJobWarningsSection(job, logClassification);
+  renderLogDiagnosticsSection(logClassification);
+  renderRawLogSection(logClassification, attempts, failureText);
   renderArtifactSummary(artifact, outputPath);
 }
 
@@ -796,17 +1228,30 @@ function renderJobDrawerActions(job, outputPath, failureText) {
   ];
   if (outputPath) actions.push(`<button class="button" type="button" data-copy="${escapeHtml(outputPath)}" data-copy-label="output path">Copy output</button>`);
   if (failureText) actions.push(`<button class="button" type="button" data-copy="${escapeHtml(failureText)}" data-copy-label="failure details">Copy failure</button>`);
-  if (canRetryJob(job)) actions.push(`<button class="button primary" type="button" data-retry-job="${escapeHtml(job.id)}">Retry now</button>`);
+  if (canRetryJob(job)) actions.push(`<button class="button primary" type="button" data-retry-job="${escapeHtml(job.id)}">Retry as new job</button>`);
   if (canCancelJob(job)) actions.push(`<button class="button danger" type="button" data-cancel-job="${escapeHtml(job.id)}">Cancel render</button>`);
+  const note = recoveryActionNote(job);
+  if (note) actions.push(`<div class="action-note">${escapeHtml(note)}</div>`);
   return actions.join('');
 }
 
 function canRetryJob(job) {
-  return ['stale', 'retrywait'].includes(className(job.state));
+  return className(job.state) === 'failed';
 }
 
 function canCancelJob(job) {
-  return !['succeeded', 'completed', 'failed', 'cancelled', 'cancelrequested', 'cancelling'].includes(className(job.state));
+  return isActiveJob(job.state);
+}
+
+function recoveryActionNote(job) {
+  const state = className(job.state);
+  if (state === 'retrywait') {
+    return job.queuedAtUtc ? `Retry policy is waiting until ${formatDate(job.queuedAtUtc)} before requeueing this job.` : 'Retry policy is waiting before this job is requeued.';
+  }
+  if (state === 'stale') return 'This job was marked stale by recovery. Use Recover stale leases or review events before retrying.';
+  if (state === 'succeeded' || state === 'completed') return 'Completed jobs are terminal and are not reopened.';
+  if (state === 'cancelled') return 'Cancelled jobs are terminal. Queue a fresh render from the profile if needed.';
+  return '';
 }
 
 function isActiveJob(value) {
@@ -846,15 +1291,17 @@ function renderArtifactSummary(artifact, outputPath = '') {
   }
 
   const files = (artifact?.sampleFiles || []).map(file => `<li>${escapeHtml(file)}</li>`).join('');
+  const detected = (artifact?.detectedExtensions || []).map(ext => `.${ext}`).join(', ');
   byId('jobDrawerArtifacts').innerHTML = `
     <article class="item artifact-card">
       <div class="item-head"><div class="item-title">${escapeHtml(outputPath || artifact.outputDirectory)}</div>${artifact ? badge('Verified') : badge('Output path')}</div>
-      <div class="meta">${artifact ? `${escapeHtml(artifact.fileCount)} file(s), ${formatBytes(artifact.totalBytes)}` : 'Output path recorded; artifact scan has not reported file counts yet.'}</div>
+      <div class="meta">${artifact ? `${escapeHtml(artifact.fileCount)} file(s), ${formatBytes(artifact.totalBytes)}${detected ? ` | ${escapeHtml(detected)}` : ``}` : 'Output path recorded; artifact scan has not reported file counts yet.'}</div>
       ${outputPath ? `<button class="button" type="button" data-copy="${escapeHtml(outputPath)}" data-copy-label="output path">Copy output path</button>` : ''}
       ${files ? `<ul class="artifact-list">${files}</ul>` : ''}
     </article>
   `;
 }
+
 function parseArtifactSummary(dataJson) {
   if (!dataJson) return null;
   try {
@@ -871,17 +1318,6 @@ function formatBytes(value) {
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
   return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
-}
-
-function renderReadinessMatrix(matrix) {
-  const rows = matrix.workers || [];
-  byId('readinessResults').innerHTML = rows.length ? rows.map(worker => `
-    <article class="item compact-item">
-      <div class="item-head"><div class="item-title">${escapeHtml(worker.workerId)}</div>${badge(worker.canRun ? 'Ready' : 'Blocked')}</div>
-      <div class="meta">${(worker.reasons || []).map(reason => escapeHtml(reason)).join('<br>') || 'Worker meets project and profile requirements.'}</div>
-    </article>
-  `).join('') : '<div class="empty">No workers are registered for readiness evaluation.</div>';
-  switchView('projects');
 }
 
 async function previewChunks() {
@@ -953,7 +1389,29 @@ function diagnosticsText() {
   if (!data) return 'RenderFarm diagnostics are not available yet. Refresh the controller dashboard and try again.';
   return JSON.stringify(data, null, 2);
 }
+
 async function handleDocumentClick(event) {
+  const confirmProceed = event.target?.closest?.('[data-confirm-proceed]');
+  if (confirmProceed) {
+    event.preventDefault();
+    resolveConfirmation(true);
+    return;
+  }
+
+  const confirmCancel = event.target?.closest?.('[data-confirm-cancel]');
+  if (confirmCancel) {
+    event.preventDefault();
+    resolveConfirmation(false);
+    return;
+  }
+  const helpTarget = event.target?.closest?.('[data-help-anchor]');
+  if (helpTarget) {
+    event.preventDefault();
+    switchView('help');
+    const anchor = document.getElementById(helpTarget.dataset.helpAnchor);
+    if (anchor) anchor.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    return;
+  }
   const modalClose = event.target?.closest?.('[data-close-modal]');
   if (modalClose) {
     event.preventDefault();
@@ -1016,10 +1474,18 @@ async function handleDocumentClick(event) {
   if (retryJob) {
     event.preventDefault();
     const jobId = retryJob.dataset.retryJob;
-    await post(`/api/jobs/${encodeURIComponent(jobId)}/retry`);
-    toast('Render requeued', 'success');
+    const proceed = await confirmAction({
+      title: 'Retry failed render as new job',
+      message: 'This creates a clean queued job and leaves the failed job terminal for traceability.',
+      details: jobId,
+      confirmLabel: 'Retry as new job',
+      tone: 'primary'
+    });
+    if (!proceed) return;
+    const retry = await post(`/api/jobs/${encodeURIComponent(jobId)}/retry`);
+    toast('Retry queued as a new job', 'success');
     await refresh();
-    await openJobDetails(jobId);
+    await openJobDetails(retry?.id || jobId);
     return;
   }
 
@@ -1027,7 +1493,13 @@ async function handleDocumentClick(event) {
   if (cancelJob) {
     event.preventDefault();
     const jobId = cancelJob.dataset.cancelJob;
-    if (!window.confirm(`Cancel render ${jobId}?`)) return;
+    const proceed = await confirmAction({
+      title: 'Cancel running render',
+      message: 'The worker will receive a cancellation request and stop the owned Unreal process if it is still running.',
+      details: jobId,
+      confirmLabel: 'Request cancellation'
+    });
+    if (!proceed) return;
     await post(`/api/jobs/${encodeURIComponent(jobId)}/cancel`);
     toast('Cancellation requested', 'warning');
     await refresh();
@@ -1042,7 +1514,7 @@ async function handleDocumentClick(event) {
     return;
   }
 
-  const actionTarget = event.target?.closest?.('[data-view], [data-fill-project-worker], [data-worker-mode], [data-accept-worker], [data-reject-worker], [data-readiness-project], [data-delete-project], [data-delete-profile], [data-open-profile-project], [data-queue-profile]');
+  const actionTarget = event.target?.closest?.('[data-view], [data-fill-project-worker], [data-worker-mode], [data-accept-worker], [data-reject-worker], [data-delete-project], [data-delete-profile], [data-open-profile-project], [data-queue-profile]');
   const data = actionTarget?.dataset;
   if (!data) return;
 
@@ -1077,18 +1549,13 @@ async function handleDocumentClick(event) {
       toast('Worker blocked from scheduling', 'warning');
       await refresh();
     }
-    if (data.readinessProject) {
-      const matrix = await getJson(`/api/projects/${encodeURIComponent(data.readinessProject)}/readiness`);
-      const ready = matrix.workers.filter(worker => worker.canRun).length;
-      renderReadinessMatrix(matrix);
-      toast(`Readiness: ${ready}/${matrix.workers.length} worker(s) can run this project.`, ready ? 'success' : 'warning');
-    }
-    if (data.deleteProject && window.confirm(`Delete project ${data.deleteProject}? Jobs that depend on it will prevent deletion.`)) {
+
+    if (data.deleteProject && await confirmAction({ title: 'Delete project', message: 'Jobs that depend on this project will prevent deletion.', details: data.deleteProject, confirmLabel: 'Delete project' })) {
       await del(`/api/projects/${encodeURIComponent(data.deleteProject)}`);
       toast('Project removed', 'success');
       await refresh();
     }
-    if (data.deleteProfile && window.confirm(`Delete render profile ${data.deleteProfile}? Jobs that depend on it will prevent deletion.`)) {
+    if (data.deleteProfile && await confirmAction({ title: 'Delete render profile', message: 'Jobs that depend on this profile will prevent deletion.', details: data.deleteProfile, confirmLabel: 'Delete profile' })) {
       await del(`/api/render-profiles/${encodeURIComponent(data.deleteProfile)}`);
       toast('Render profile removed', 'success');
       await refresh();
@@ -1114,13 +1581,13 @@ function bindEvents() {
     await refresh();
   });
   byId('clearJobsBtn').addEventListener('click', async () => {
-    if (!window.confirm('Clear queue history, attempts, leases, and events? Projects, profiles, and workers will remain.')) return;
+    if (!await confirmAction({ title: 'Clear queue history', message: 'This clears jobs, attempts, leases, and events. Projects, profiles, and workers remain.', confirmLabel: 'Clear queue history' })) return;
     const result = await del('/api/jobs');
     toast(result.message || 'Queue history cleared', 'success');
     await refresh();
   });
   byId('resetStateBtn').addEventListener('click', async () => {
-    if (!window.confirm('Reset the controller database? This clears workers, projects, profiles, jobs, events, leases, and settings.')) return;
+    if (!await confirmAction({ title: 'Reset controller database', message: 'This clears workers, projects, profiles, jobs, events, leases, and settings.', details: 'This cannot be undone from the dashboard.', confirmLabel: 'Reset database' })) return;
     const result = await del('/api/admin/state');
     toast(result.message || 'Controller database reset', 'success');
     await refresh();
@@ -1148,11 +1615,18 @@ function bindEvents() {
     state.workerStatus = className(event.target.value);
     renderWorkers();
   });
+  byId('helpSearch')?.addEventListener('input', event => {
+    const query = className(event.target.value);
+    document.querySelectorAll('#helpContent .help-card').forEach(card => {
+      card.classList.toggle('hidden', query && !className(card.textContent).includes(query));
+    });
+  });
   byId('jobForm').addEventListener('change', renderSelects);
+  byId('renderDefaultsForm').addEventListener('submit', saveRenderDefaults);
   byId('apiTokenInput').value = getStoredApiToken();
   byId('saveApiTokenBtn').addEventListener('click', () => { setStoredApiToken(byId('apiTokenInput').value); toast('Controller token saved in this browser', 'success'); });
   byId('clearApiTokenBtn').addEventListener('click', () => { byId('apiTokenInput').value = ''; setStoredApiToken(''); toast('Controller token cleared', 'success'); });
-  byId('previewChunksBtn').addEventListener('click', async () => { try { await previewChunks(); } catch (error) { toast(error.message, 'error'); } });
+  byId('previewChunksBtn')?.addEventListener('click', async () => { try { await previewChunks(); } catch (error) { toast(error.message, 'error'); } });
 
   byId('newRenderNextBtn').addEventListener('click', () => {
     if (validateWizardThrough(newRenderStep)) setNewRenderStep(newRenderStep + 1);
@@ -1161,10 +1635,12 @@ function bindEvents() {
   byId('newRenderForm').addEventListener('submit', submitNewRenderWizard);
   byId('newRenderForm').addEventListener('change', event => {
     if (event.target?.id === 'newRenderProjectSelect' || event.target?.name === 'wizardProjectMode') updateWizardProfileOptions();
+    if (['newProfileMap', 'newProfileSequence', 'newProfileAsset', 'newProfileMrqMode'].includes(event.target?.name)) applyWizardPathNormalisation(event.target);
     updateWizardModes();
     updateWizardRenderFields();
     updateWizardReadiness();
     renderWizardReview();
+    byId('newRenderQueueBtn').disabled = Boolean(validateWizardStep(1) || validateWizardStep(2) || validateWizardStep(3));
   });
   byId('newRenderForm').addEventListener('input', event => {
     if (event.target?.name === 'newProjectName' && !event.target.form.elements.newProjectId.value) {
@@ -1173,8 +1649,9 @@ function bindEvents() {
     if (event.target?.name === 'newProfileName' && !event.target.form.elements.newProfileId.value) {
       event.target.form.elements.newProfileId.placeholder = slug(event.target.value || 'render-setup-id');
     }
-    if (newRenderStep >= 3) updateWizardReadiness();
+    updateWizardReadiness();
     renderWizardReview();
+    byId('newRenderQueueBtn').disabled = Boolean(validateWizardStep(1) || validateWizardStep(2) || validateWizardStep(3));
   });
 
   byId('projectForm').addEventListener('submit', async event => {
@@ -1214,11 +1691,18 @@ function bindEvents() {
     const data = formData(form);
     const settings = {};
     if (data.mapName) settings.map = data.mapName;
+    if (data.levelSequence) settings.sequence = data.levelSequence;
+    if (data.mrqMode) settings.mrqMode = data.mrqMode;
     if (data.extraArgs) settings.extraArgs = data.extraArgs;
     addOptionalSetting(settings, 'minCpuCores', data.minCpuCores);
     addOptionalSetting(settings, 'minRamGb', data.minRamGb);
     addOptionalSetting(settings, 'minVramGb', data.minVramGb);
     addOptionalSetting(settings, 'gpuNameContains', data.gpuNameContains);
+    addOptionalSetting(settings, 'unrealExecutablePath', data.unrealExecutablePath);
+    addOptionalSetting(settings, 'unrealSearchRoot', data.unrealSearchRoot);
+    addOptionalSetting(settings, 'defaultOutputRoot', data.defaultOutputRoot);
+    addOptionalSetting(settings, 'outputSubfolderPattern', data.outputSubfolderPattern);
+    addOptionalSetting(settings, 'timeoutSeconds', data.timeoutSeconds);
 
     await sendJson('/api/render-profiles', 'POST', {
       id: data.id,
@@ -1239,6 +1723,14 @@ function bindEvents() {
     await refresh();
   });
 
+  const confirmModal = byId('confirmActionModal');
+  confirmModal?.addEventListener('cancel', event => {
+    event.preventDefault();
+    resolveConfirmation(false);
+  });
+  confirmModal?.addEventListener('close', () => {
+    if (pendingConfirmation) resolveConfirmation(false);
+  });
   byId('jobForm').addEventListener('submit', async event => {
     event.preventDefault();
     const form = event.target;
@@ -1251,7 +1743,7 @@ function bindEvents() {
       outputDirectory: data.outputDirectory || null
     });
 
-    toast('Render queued', 'success');
+    toast('Render submitted', 'success');
     form.reset();
     closeModal('jobModal');
     switchView('queue');
@@ -1267,13 +1759,6 @@ state.refreshTimer = window.setInterval(() => refresh({ quiet: true }), refreshI
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden) void refresh({ quiet: true });
 });
-
-
-
-
-
-
-
 
 
 

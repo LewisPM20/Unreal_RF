@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.Net.Http;
@@ -10,6 +11,7 @@ public partial class MainWindow : Window
 {
     private readonly string settingsPath = RenderFarmLauncher.ResolveSettingsPath(null);
     private RoleLaunchResult? activeControllerLaunch;
+    private RoleLaunchResult? activeWorkerLaunch;
     private bool controllerVerified;
 
     public MainWindow()
@@ -120,6 +122,31 @@ public partial class MainWindow : Window
                     return;
                 }
 
+                using (var client = new HttpClient { Timeout = TimeSpan.FromSeconds(2) })
+                {
+                    var existing = await RenderFarmLauncher.CheckControllerHealthAsync(client, RenderFarmLauncher.GetHealthUrl(dashboardUrl), CancellationToken.None);
+                    if (existing.Succeeded && activeControllerLaunch?.Process is not { HasExited: false })
+                    {
+                        var reuse = MessageBox.Show(
+                            this,
+                            "A controller is already responding at this address. Reuse the existing controller? Choose No to cancel startup.",
+                            "Controller already running",
+                            MessageBoxButton.YesNo,
+                            MessageBoxImage.Information);
+                        if (reuse == MessageBoxResult.Yes)
+                        {
+                            controllerVerified = true;
+                            SetStatus("Controller dashboard already running.", $"Reusing {dashboardUrl}");
+                            return;
+                        }
+
+                        SetStatus("Controller startup cancelled.", "Existing controller remains running and was not touched by this launcher instance.");
+                        return;
+                    }
+                }
+
+                StopOwnedLaunch(activeControllerLaunch, "previous controller", TimeSpan.FromSeconds(4));
+                activeControllerLaunch = null;
                 SetStatus("Starting controller dashboard...", $"Binding to {dashboardUrl} and using database {RenderFarmLauncher.GetDefaultControllerDatabasePath()}");
                 var launch = RenderFarmLauncher.StartRoleDetailed(settings, captureOutput: true);
                 if (!launch.Started)
@@ -143,10 +170,13 @@ public partial class MainWindow : Window
             }
 
             SetStatus("Starting worker...", "The worker will appear in the controller dashboard after it heartbeats.");
+            StopOwnedLaunch(activeWorkerLaunch, "previous worker", TimeSpan.FromSeconds(4));
+            activeWorkerLaunch = null;
             var workerLaunch = RenderFarmLauncher.StartRoleDetailed(settings, captureOutput: false);
             if (workerLaunch.Started)
             {
-                SetStatus("Worker start requested.", "Watch the controller dashboard for pending approval, heartbeat, and capability status.");
+                activeWorkerLaunch = workerLaunch;
+                SetStatus("Worker started.", "Closing the launcher will stop this worker process unless it was installed as a Windows Service.");
             }
             else
             {
@@ -253,6 +283,75 @@ public partial class MainWindow : Window
         }
     }
 
+    protected override void OnClosing(CancelEventArgs e)
+    {
+        base.OnClosing(e);
+        StopOwnedLaunch(activeWorkerLaunch, "worker", TimeSpan.FromSeconds(4));
+        StopOwnedLaunch(activeControllerLaunch, "controller", TimeSpan.FromSeconds(4));
+        activeWorkerLaunch = null;
+        activeControllerLaunch = null;
+    }
+
+    private static void StopOwnedLaunch(RoleLaunchResult? launch, string label, TimeSpan timeout)
+    {
+        var process = launch?.Process;
+        if (process is null)
+        {
+            return;
+        }
+
+        try
+        {
+            if (process.HasExited)
+            {
+                process.Dispose();
+                return;
+            }
+
+            LogLauncherEvent($"Stopping owned {label} process {process.Id}.");
+            try
+            {
+                process.CloseMainWindow();
+            }
+            catch (InvalidOperationException)
+            {
+            }
+
+            if (!process.WaitForExit(timeout))
+            {
+                LogLauncherEvent($"Owned {label} process {process.Id} did not exit gracefully; killing process tree.");
+                process.Kill(entireProcessTree: true);
+                process.WaitForExit((int)TimeSpan.FromSeconds(2).TotalMilliseconds);
+            }
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception)
+        {
+            LogLauncherEvent($"Could not stop owned {label} process: {ex.Message}");
+        }
+        finally
+        {
+            process.Dispose();
+        }
+    }
+
+    private static void LogLauncherEvent(string message)
+    {
+        try
+        {
+            var root = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            if (string.IsNullOrWhiteSpace(root))
+            {
+                root = AppContext.BaseDirectory;
+            }
+
+            var directory = Path.Combine(root, "RenderFarm");
+            Directory.CreateDirectory(directory);
+            File.AppendAllText(Path.Combine(directory, "launcher.log"), $"[{DateTimeOffset.Now:O}] {message}{Environment.NewLine}");
+        }
+        catch (Exception)
+        {
+        }
+    }
     private static string? BuildHealthUrl(LauncherSettings settings)
     {
         string? baseUrl = null;
@@ -282,9 +381,6 @@ public partial class MainWindow : Window
         AddPowerShellValue(builder, "WorkerId", settings.WorkerId);
         AddPowerShellValue(builder, "DisplayName", settings.DisplayName);
         AddPowerShellValue(builder, "ApiToken", settings.ApiToken);
-        AddPowerShellValue(builder, "UnrealSearchRoot", settings.UnrealSearchRoot);
-        AddPowerShellValue(builder, "ProjectPath", settings.ProjectPath);
-        AddPowerShellValue(builder, "SharedOutputRoot", settings.SharedOutputRoot);
         if (settings.DiscoveryEnabled) builder.Append(" -DiscoveryEnabled");
         builder.Append(" -Start");
         return builder.ToString();
@@ -342,5 +438,10 @@ public partial class MainWindow : Window
         MessageBox.Show(this, message, "RenderFarm Launcher", MessageBoxButton.OK, MessageBoxImage.Error);
     }
 }
+
+
+
+
+
 
 

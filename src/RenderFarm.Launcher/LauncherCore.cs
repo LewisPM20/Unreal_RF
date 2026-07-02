@@ -408,9 +408,6 @@ internal static class RenderFarmLauncher
             if (!string.IsNullOrWhiteSpace(settings.WorkerId)) startInfo.Environment["RenderFarm__WorkerId"] = settings.WorkerId;
             if (!string.IsNullOrWhiteSpace(settings.DisplayName)) startInfo.Environment["RenderFarm__DisplayName"] = settings.DisplayName;
             if (!string.IsNullOrWhiteSpace(settings.ApiToken)) startInfo.Environment["RenderFarm__ApiToken"] = settings.ApiToken;
-            if (!string.IsNullOrWhiteSpace(settings.ProjectPath)) startInfo.Environment["RenderFarm__ProjectPaths__0"] = settings.ProjectPath;
-            if (!string.IsNullOrWhiteSpace(settings.SharedOutputRoot)) startInfo.Environment["RenderFarm__SharedOutputRoots__0"] = settings.SharedOutputRoot;
-            if (!string.IsNullOrWhiteSpace(settings.UnrealSearchRoot)) startInfo.Environment["RenderFarm__UnrealSearchRoots__0"] = settings.UnrealSearchRoot;
             startInfo.Environment["RenderFarm__DiscoveryEnabled"] = settings.DiscoveryEnabled.ToString();
             startInfo.Environment["RenderFarm__DiscoverySeconds"] = settings.DiscoverySeconds.ToString();
             startInfo.Environment["RenderFarm__DiscoveryPort"] = settings.DiscoveryPort.ToString();
@@ -458,7 +455,7 @@ internal static class RenderFarmLauncher
         Console.WriteLine("Usage:");
         Console.WriteLine("  RenderFarm.Launcher --role controller --save --host 127.0.0.1 --port 9200");
         Console.WriteLine("  RenderFarm.Launcher --role worker --save --controller-url http://CONTROLLER_IP:9200 --worker-id worker-01");
-        Console.WriteLine("  RenderFarm.Launcher --role worker --save --discovery --unreal-search-root \"C:\\Program Files\\Epic Games\" --project-path D:\\Project\\Project.uproject --shared-output-root \\\\SERVER\\RenderOutput");
+        Console.WriteLine("  RenderFarm.Launcher --role worker --save --discovery --display-name Render-PC-01");
         Console.WriteLine("  RenderFarm.Launcher --show-config");
     }
 }

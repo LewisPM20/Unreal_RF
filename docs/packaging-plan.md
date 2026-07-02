@@ -119,7 +119,7 @@ RenderFarm includes a WPF launcher, so target machines need the Microsoft .NET 8
 
 ## Worker service flow
 
-After installing the product on a worker PC, use the launcher in Worker mode to confirm the controller URL and worker settings. The service installer is intentionally kept as an elevated script for now.
+After installing the product on a worker PC, use the launcher in Worker mode to set only the controller URL and optional worker identity. The service installer is intentionally kept as an elevated script for now; Unreal/project/output settings are controller-owned and sent with job assignments.
 
 The elevated path is:
 
@@ -128,9 +128,6 @@ The elevated path is:
   -ControllerUrl http://CONTROLLER_IP:9200 `
   -WorkerId worker-pc-01 `
   -DisplayName "Render Worker 01" `
-  -UnrealSearchRoot "C:\Program Files\Epic Games" `
-  -ProjectPath "D:\Projects\Example\Example.uproject" `
-  -SharedOutputRoot "\\SERVER\RenderFarmOutput" `
   -Start
 ```
 

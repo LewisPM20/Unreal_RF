@@ -1,5 +1,7 @@
 using System.Diagnostics;
+using System.Text.RegularExpressions;
 using RenderFarm.Domain;
+using RenderFarm.Shared;
 
 namespace RenderFarm.Worker.Agent;
 
@@ -143,11 +145,18 @@ public sealed record UnrealRenderRequest(
     RenderProfile Profile,
     string OutputDirectory,
     string LogDirectory,
-    TimeSpan? Timeout);
+    TimeSpan? Timeout,
+    IReadOnlyDictionary<string, string>? Variables = null);
 
 public sealed record UnrealRenderCommand(string ExecutablePath, IReadOnlyList<string> Arguments, string CommandLine, string LogFilePath);
 
 public sealed record ProcessLaunchResult(int? ExitCode, bool TimedOut, string StandardOutput, string StandardError, FailureCategory FailureCategory);
+
+public sealed class RenderProcessExecutionOptions
+{
+    public int MaxCapturedOutputCharacters { get; set; } = 262_144;
+    public int NoProgressTimeoutSeconds { get; set; } = 0;
+}
 
 public interface IUnrealCommandBuilder
 {
@@ -196,28 +205,50 @@ public sealed class UnrealCommandBuilder : IUnrealCommandBuilder
         }
 
         var mapName = FirstNonEmpty(GetSetting(request.Profile, "map"), GetSetting(request.Profile, "mapName"), GetSetting(request.Profile, "level"), GetSetting(request.Profile, "levelName"));
+        var levelSequence = FirstNonEmpty(GetSetting(request.Profile, "sequence"), GetSetting(request.Profile, "levelSequence"));
         var moviePipelineConfig = FirstNonEmpty(request.Profile.AssetPath, GetSetting(request.Profile, "moviePipelineConfig"), GetSetting(request.Profile, "mrqConfig"), GetSetting(request.Profile, "queue"));
+        var launchMode = ResolveMovieRenderLaunchMode(request.Profile, levelSequence);
 
         yield return request.ProjectPath;
 
         if (!string.IsNullOrWhiteSpace(mapName))
         {
-            yield return mapName;
+            yield return NormalizeOrThrow(mapName, UnrealAssetPathKind.WorldPackagePath, "Map/world path");
         }
         else if (IsMovieRenderProfile(request.Profile))
         {
-            throw new InvalidOperationException("MRQ render profiles must set settings.map or settings.level, for example Minimal_Default1. Without a map, Unreal can open like a normal project instead of running the command-line render.");
+            throw new InvalidOperationException("MRQ/MRG render profiles must set a map argument such as Minimal_Default1 or /Game/Maps/MainMap. Do not use /Game/Maps/MainMap.MainMap for the map argument.");
         }
 
         yield return "-game";
 
+        if (IsMovieRenderProfile(request.Profile) && launchMode == MovieRenderLaunchMode.SingleSequence && string.IsNullOrWhiteSpace(levelSequence))
+        {
+            throw new InvalidOperationException("Single Sequence MRQ mode requires a Level Sequence object path such as /Game/Cinematics/Shot01.Shot01. If your -MoviePipelineConfig value is a saved queue asset instead, set mrqMode/renderMode/movieRenderMode to Queue.");
+        }
+
+        if (IsMovieRenderProfile(request.Profile) && launchMode == MovieRenderLaunchMode.SavedQueue && !string.IsNullOrWhiteSpace(levelSequence) && HasExplicitMovieRenderLaunchMode(request.Profile))
+        {
+            throw new InvalidOperationException("Saved MRQ Queue mode should not set a separate Level Sequence. Remove the sequence field, or switch the profile to Single Sequence + Config mode.");
+        }
+
+        if (launchMode == MovieRenderLaunchMode.SingleSequence && !string.IsNullOrWhiteSpace(levelSequence))
+        {
+            yield return $"-LevelSequence={NormalizeOrThrow(levelSequence, UnrealAssetPathKind.LevelSequenceObjectPath, "Level Sequence path")}";
+        }
+
         if (!string.IsNullOrWhiteSpace(moviePipelineConfig))
         {
-            yield return $"-MoviePipelineConfig={moviePipelineConfig}";
+            var configKind = launchMode == MovieRenderLaunchMode.SavedQueue
+                ? UnrealAssetPathKind.MoviePipelineQueueObjectPath
+                : UnrealAssetPathKind.MoviePipelineConfigObjectPath;
+            yield return $"-MoviePipelineConfig={NormalizeOrThrow(moviePipelineConfig, configKind, "Movie Pipeline config/queue path")}";
         }
         else if (IsMovieRenderProfile(request.Profile))
         {
-            throw new InvalidOperationException("MRQ render profiles must set assetPath or settings.moviePipelineConfig, for example /Game/Cinematics/myRenderQueue.");
+            throw new InvalidOperationException(launchMode == MovieRenderLaunchMode.SavedQueue
+                ? "Saved MRQ Queue mode requires a saved queue asset path such as /Game/Cinematics/myRenderQueue."
+                : "Single Sequence MRQ mode requires a saved Movie Pipeline config preset such as /Game/RenderConfig.RenderConfig.");
         }
 
         yield return "-windowed";
@@ -244,16 +275,36 @@ public sealed class UnrealCommandBuilder : IUnrealCommandBuilder
             yield break;
         }
 
+        var sequence = FirstNonEmpty(GetSetting(request.Profile, "sequence"), GetSetting(request.Profile, "levelSequence"));
+        var assetKind = ResolveMovieRenderLaunchMode(request.Profile, sequence) == MovieRenderLaunchMode.SavedQueue
+            ? UnrealAssetPathKind.MoviePipelineQueueObjectPath
+            : UnrealAssetPathKind.MoviePipelineConfigObjectPath;
+
         var expanded = template
             .Replace("{project}", request.ProjectPath, StringComparison.OrdinalIgnoreCase)
             .Replace("{uproject}", request.ProjectPath, StringComparison.OrdinalIgnoreCase)
             .Replace("{projectDir}", Path.GetDirectoryName(request.ProjectPath) ?? string.Empty, StringComparison.OrdinalIgnoreCase)
             .Replace("{output}", request.OutputDirectory, StringComparison.OrdinalIgnoreCase)
             .Replace("{outputDir}", request.OutputDirectory, StringComparison.OrdinalIgnoreCase)
-            .Replace("{asset}", request.Profile.AssetPath ?? string.Empty, StringComparison.OrdinalIgnoreCase)
-            .Replace("{moviePipelineConfig}", request.Profile.AssetPath ?? string.Empty, StringComparison.OrdinalIgnoreCase)
-            .Replace("{map}", FirstNonEmpty(GetSetting(request.Profile, "map"), GetSetting(request.Profile, "mapName"), GetSetting(request.Profile, "level"), GetSetting(request.Profile, "levelName")), StringComparison.OrdinalIgnoreCase)
-            .Replace("{level}", FirstNonEmpty(GetSetting(request.Profile, "level"), GetSetting(request.Profile, "map"), GetSetting(request.Profile, "mapName")), StringComparison.OrdinalIgnoreCase);
+            .Replace("{asset}", NormalizeTemplateValue(request.Profile.AssetPath, assetKind), StringComparison.OrdinalIgnoreCase)
+            .Replace("{moviePipelineConfig}", NormalizeTemplateValue(request.Profile.AssetPath, assetKind), StringComparison.OrdinalIgnoreCase)
+            .Replace("{map}", NormalizeTemplateValue(FirstNonEmpty(GetSetting(request.Profile, "map"), GetSetting(request.Profile, "mapName"), GetSetting(request.Profile, "level"), GetSetting(request.Profile, "levelName")), UnrealAssetPathKind.WorldPackagePath), StringComparison.OrdinalIgnoreCase)
+            .Replace("{level}", NormalizeTemplateValue(FirstNonEmpty(GetSetting(request.Profile, "level"), GetSetting(request.Profile, "map"), GetSetting(request.Profile, "mapName")), UnrealAssetPathKind.WorldPackagePath), StringComparison.OrdinalIgnoreCase)
+            .Replace("{sequence}", NormalizeTemplateValue(sequence, UnrealAssetPathKind.LevelSequenceObjectPath), StringComparison.OrdinalIgnoreCase);
+
+        foreach (var variable in request.Variables ?? new Dictionary<string, string>())
+        {
+            expanded = expanded.Replace("{" + variable.Key + "}", variable.Value ?? string.Empty, StringComparison.OrdinalIgnoreCase);
+        }
+
+        var unresolvedTokens = Regex.Matches(expanded, "\\{[A-Za-z][A-Za-z0-9_]*\\}")
+            .Select(match => match.Value)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (unresolvedTokens.Length > 0)
+        {
+            throw new InvalidOperationException($"Render command template contains unresolved token(s): {string.Join(", ", unresolvedTokens)}.");
+        }
 
         foreach (var argument in SplitArguments(expanded))
         {
@@ -261,6 +312,26 @@ public sealed class UnrealCommandBuilder : IUnrealCommandBuilder
         }
     }
 
+    private static string NormalizeOrThrow(string value, UnrealAssetPathKind kind, string label)
+    {
+        var result = UnrealPathNormalizer.TryNormalizeUnrealReference(value, kind);
+        if (!result.Success || string.IsNullOrWhiteSpace(result.NormalizedPath))
+        {
+            throw new InvalidOperationException($"{label} is invalid: {result.Error}");
+        }
+
+        return result.NormalizedPath;
+    }
+
+    private static string NormalizeTemplateValue(string? value, UnrealAssetPathKind kind)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return string.Empty;
+        }
+
+        return NormalizeOrThrow(value, kind, "Command template asset path");
+    }
     private static IEnumerable<string> SplitArguments(string commandLine)
     {
         var current = new List<char>();
@@ -293,6 +364,57 @@ public sealed class UnrealCommandBuilder : IUnrealCommandBuilder
         }
     }
 
+
+    private enum MovieRenderLaunchMode
+    {
+        SavedQueue,
+        SingleSequence
+    }
+
+    private static MovieRenderLaunchMode ResolveMovieRenderLaunchMode(RenderProfile profile, string? levelSequence)
+    {
+        var raw = GetMovieRenderLaunchModeValue(profile);
+        if (IsSingleSequenceMode(raw))
+        {
+            return MovieRenderLaunchMode.SingleSequence;
+        }
+
+        if (IsQueueMode(raw))
+        {
+            return MovieRenderLaunchMode.SavedQueue;
+        }
+
+        return string.IsNullOrWhiteSpace(levelSequence)
+            ? MovieRenderLaunchMode.SavedQueue
+            : MovieRenderLaunchMode.SingleSequence;
+    }
+
+    private static bool HasExplicitMovieRenderLaunchMode(RenderProfile profile) =>
+        !string.IsNullOrWhiteSpace(GetMovieRenderLaunchModeValue(profile));
+
+    private static string GetMovieRenderLaunchModeValue(RenderProfile profile) =>
+        FirstNonEmpty(
+            GetSetting(profile, "mrqMode"),
+            GetSetting(profile, "renderMode"),
+            GetSetting(profile, "movieRenderMode"),
+            GetSetting(profile, "moviePipelineMode"),
+            GetSetting(profile, "launchMode"));
+
+    private static bool IsSingleSequenceMode(string? value)
+    {
+        var key = NormalizeModeKey(value);
+        return key is "single" or "singlesequence" or "sequence" or "levelsequence" or "config" or "configpreset" or "sequenceconfig" or "singlelevelsequence";
+    }
+
+    private static bool IsQueueMode(string? value)
+    {
+        var key = NormalizeModeKey(value);
+        return key is "queue" or "savedqueue" or "queuepreset" or "mrqqueue" or "moviepipelinequeue";
+    }
+
+    private static string NormalizeModeKey(string? value) =>
+        new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToLowerInvariant).ToArray());
+
     private static bool IsMovieRenderProfile(RenderProfile profile) =>
         profile.Type is RenderProfileType.MrqQueue or RenderProfileType.MrgGraph;
 
@@ -322,9 +444,20 @@ public sealed class UnrealCommandBuilder : IUnrealCommandBuilder
 
     private static string FirstNonEmpty(params string?[] values) => values.FirstOrDefault(x => !string.IsNullOrWhiteSpace(x)) ?? string.Empty;
 
-    private static string Quote(string value) => value.Contains(' ') || value.Contains('"')
-        ? '"' + value.Replace("\"", "\\\"", StringComparison.Ordinal) + '"'
-        : value;
+    private static string Quote(string value)
+    {
+        var equalsIndex = value.IndexOf('=', StringComparison.Ordinal);
+        if (equalsIndex > 0 && value.StartsWith("-", StringComparison.Ordinal))
+        {
+            var key = value[..(equalsIndex + 1)];
+            var argumentValue = value[(equalsIndex + 1)..];
+            return key + '"' + argumentValue.Replace("\"", "\\\"", StringComparison.Ordinal) + '"';
+        }
+
+        return value.Contains(' ') || value.Contains('"')
+            ? '"' + value.Replace("\"", "\\\"", StringComparison.Ordinal) + '"'
+            : value;
+    }
 
     private static string SanitizeFileName(string value)
     {
@@ -338,8 +471,10 @@ public interface IProcessLauncher
     Task<ProcessLaunchResult> RunAsync(string executablePath, IReadOnlyList<string> arguments, string? logFilePath, TimeSpan? timeout, CancellationToken cancellationToken);
 }
 
-public sealed class ProcessLauncher(ILogger<ProcessLauncher> logger) : IProcessLauncher
+public sealed class ProcessLauncher(ILogger<ProcessLauncher> logger, Microsoft.Extensions.Options.IOptions<RenderProcessExecutionOptions>? options = null) : IProcessLauncher
 {
+    private readonly RenderProcessExecutionOptions executionOptions = options?.Value ?? new RenderProcessExecutionOptions();
+
     public async Task<ProcessLaunchResult> RunAsync(string executablePath, IReadOnlyList<string> arguments, string? logFilePath, TimeSpan? timeout, CancellationToken cancellationToken)
     {
         var startInfo = new ProcessStartInfo
@@ -350,6 +485,8 @@ public sealed class ProcessLauncher(ILogger<ProcessLauncher> logger) : IProcessL
             UseShellExecute = false,
             CreateNoWindow = true
         };
+        startInfo.Environment["RENDERFARM_OWNED_PROCESS"] = "1";
+        startInfo.Environment["RENDERFARM_INSTANCE_ROOT"] = AppContext.BaseDirectory;
 
         foreach (var argument in arguments)
         {
@@ -357,6 +494,25 @@ public sealed class ProcessLauncher(ILogger<ProcessLauncher> logger) : IProcessL
         }
 
         using var process = new Process { StartInfo = startInfo, EnableRaisingEvents = true };
+        var captured = new BoundedProcessOutput(Math.Max(4096, executionOptions.MaxCapturedOutputCharacters));
+        var lastProgressUtc = DateTimeOffset.UtcNow;
+        process.OutputDataReceived += (_, args) =>
+        {
+            if (args.Data is not null)
+            {
+                captured.AppendOutput(args.Data);
+                lastProgressUtc = DateTimeOffset.UtcNow;
+            }
+        };
+        process.ErrorDataReceived += (_, args) =>
+        {
+            if (args.Data is not null)
+            {
+                captured.AppendError(args.Data);
+                lastProgressUtc = DateTimeOffset.UtcNow;
+            }
+        };
+
         try
         {
             if (!process.Start())
@@ -364,6 +520,8 @@ public sealed class ProcessLauncher(ILogger<ProcessLauncher> logger) : IProcessL
                 return new(null, false, string.Empty, "Process did not start.", FailureCategory.UnrealLaunchFailed);
             }
 
+            process.BeginOutputReadLine();
+            process.BeginErrorReadLine();
             logger.LogInformation("Started process {ProcessId}: {Executable} {Arguments}", process.Id, executablePath, string.Join(" ", arguments));
         }
         catch (Exception ex)
@@ -371,38 +529,68 @@ public sealed class ProcessLauncher(ILogger<ProcessLauncher> logger) : IProcessL
             return new(null, false, string.Empty, ex.Message, FailureCategory.UnrealLaunchFailed);
         }
 
-        var stdoutTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
-        var stderrTask = process.StandardError.ReadToEndAsync(cancellationToken);
-        using var timeoutCts = timeout is null ? null : new CancellationTokenSource(timeout.Value);
-        using var linkedCts = timeoutCts is null
-            ? CancellationTokenSource.CreateLinkedTokenSource(cancellationToken)
-            : CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token);
-
         var timedOut = false;
+        var noProgressTimedOut = false;
+        var startedUtc = DateTimeOffset.UtcNow;
+        var waitTask = process.WaitForExitAsync(cancellationToken);
         try
         {
-            await process.WaitForExitAsync(linkedCts.Token);
-        }
-        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
-        {
-            timedOut = true;
-            TryKill(process);
+            while (!waitTask.IsCompleted)
+            {
+                var completed = await Task.WhenAny(waitTask, Task.Delay(TimeSpan.FromSeconds(1), cancellationToken));
+                if (completed == waitTask)
+                {
+                    break;
+                }
+
+                var now = DateTimeOffset.UtcNow;
+                if (timeout is not null && now - startedUtc >= timeout.Value)
+                {
+                    timedOut = true;
+                    TryKill(process);
+                    break;
+                }
+
+                var noProgressTimeout = executionOptions.NoProgressTimeoutSeconds;
+                if (noProgressTimeout > 0 && now - lastProgressUtc >= TimeSpan.FromSeconds(noProgressTimeout))
+                {
+                    noProgressTimedOut = true;
+                    TryKill(process);
+                    break;
+                }
+            }
+
+            await waitTask;
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             TryKill(process);
             throw;
         }
+        catch (OperationCanceledException)
+        {
+            timedOut = true;
+            TryKill(process);
+        }
 
-        var stdout = await SafeReadAsync(stdoutTask);
-        var stderr = await SafeReadAsync(stderrTask);
+        var stdout = captured.StandardOutput;
+        var stderr = captured.StandardError;
+        if (noProgressTimedOut)
+        {
+            stderr = AppendLine(stderr, $"Render process produced no stdout/stderr progress for {executionOptions.NoProgressTimeoutSeconds} second(s); watchdog stopped it.");
+        }
+        else if (timedOut)
+        {
+            stderr = AppendLine(stderr, timeout is null ? "Render process timed out; watchdog stopped it." : $"Render process exceeded timeout {timeout.Value}; watchdog stopped it.");
+        }
+
         if (!string.IsNullOrWhiteSpace(logFilePath))
         {
             Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(logFilePath))!);
             await File.WriteAllTextAsync(logFilePath, stdout + Environment.NewLine + stderr, cancellationToken);
         }
 
-        var category = timedOut
+        var category = timedOut || noProgressTimedOut
             ? FailureCategory.RenderProcessTimedOut
             : process.ExitCode == 0 ? FailureCategory.None : FailureCategory.RenderProcessFailed;
 
@@ -412,20 +600,11 @@ public sealed class ProcessLauncher(ILogger<ProcessLauncher> logger) : IProcessL
             logger.LogWarning("Process {Executable} failed with category {Category} and exit code {ExitCode}", executablePath, category, process.HasExited ? process.ExitCode : null);
         }
 
-        return new(process.HasExited ? process.ExitCode : null, timedOut, stdout, stderr, category);
+        return new(process.HasExited ? process.ExitCode : null, timedOut || noProgressTimedOut, stdout, stderr, category);
     }
 
-    private static async Task<string> SafeReadAsync(Task<string> readTask)
-    {
-        try
-        {
-            return await readTask;
-        }
-        catch (OperationCanceledException)
-        {
-            return string.Empty;
-        }
-    }
+    private static string AppendLine(string existing, string line) =>
+        string.IsNullOrWhiteSpace(existing) ? line : existing + Environment.NewLine + line;
 
     private static void TryKill(Process process)
     {
@@ -440,8 +619,57 @@ public sealed class ProcessLauncher(ILogger<ProcessLauncher> logger) : IProcessL
         {
         }
     }
-}
 
+    private sealed class BoundedProcessOutput(int maxCharacters)
+    {
+        private readonly object syncRoot = new();
+        private readonly Queue<string> stdout = new();
+        private readonly Queue<string> stderr = new();
+        private int stdoutLength;
+        private int stderrLength;
+
+        public string StandardOutput
+        {
+            get
+            {
+                lock (syncRoot)
+                {
+                    return string.Join(Environment.NewLine, stdout);
+                }
+            }
+        }
+
+        public string StandardError
+        {
+            get
+            {
+                lock (syncRoot)
+                {
+                    return string.Join(Environment.NewLine, stderr);
+                }
+            }
+        }
+
+        public void AppendOutput(string line) => Append(stdout, ref stdoutLength, line);
+
+        public void AppendError(string line) => Append(stderr, ref stderrLength, line);
+
+        private void Append(Queue<string> queue, ref int length, string line)
+        {
+            lock (syncRoot)
+            {
+                var value = line.Length > maxCharacters ? line[^maxCharacters..] : line;
+                queue.Enqueue(value);
+                length += value.Length + Environment.NewLine.Length;
+                while (length > maxCharacters && queue.Count > 1)
+                {
+                    var removed = queue.Dequeue();
+                    length -= removed.Length + Environment.NewLine.Length;
+                }
+            }
+        }
+    }
+}
 public interface IUnrealProcessLauncher
 {
     Task<ProcessLaunchResult> LaunchRenderAsync(UnrealRenderRequest request, string jobId, int attemptNumber, CancellationToken cancellationToken);
@@ -455,3 +683,7 @@ public sealed class UnrealProcessLauncher(IUnrealCommandBuilder commandBuilder, 
         return processLauncher.RunAsync(command.ExecutablePath, command.Arguments, command.LogFilePath, request.Timeout, cancellationToken);
     }
 }
+
+
+
+

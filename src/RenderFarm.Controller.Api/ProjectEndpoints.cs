@@ -15,7 +15,7 @@ public static class ProjectEndpoints
         group.MapGet("/{projectId}", async (string projectId, IProjectRepository projects, CancellationToken ct) =>
             await projects.GetAsync(projectId, ct) is { } project ? Results.Ok(project.ToDto()) : Results.NotFound());
 
-        group.MapGet("/{projectId}/readiness", async (string projectId, string? renderProfileId, IProjectRepository projects, IRenderProfileRepository profiles, IWorkerRepository workers, CancellationToken ct) =>
+        group.MapGet("/{projectId}/readiness", async (string projectId, string? renderProfileId, IProjectRepository projects, IRenderProfileRepository profiles, IWorkerRepository workers, ISettingsRepository settings, CancellationToken ct) =>
         {
             var project = await projects.GetAsync(projectId, ct);
             if (project is null)
@@ -29,11 +29,12 @@ public static class ProjectEndpoints
                 return Results.NotFound(new { error = "Render profile was not found." });
             }
 
-            var matrix = new ReadinessMatrixDto(project.Id, profile?.Id, (await workers.ListAsync(ct)).Select(worker => WorkerReadinessEvaluator.Evaluate(worker, project, profile)).ToArray());
+            var defaults = await ControllerRenderDefaults.LoadAsync(settings, ct);
+            var matrix = new ReadinessMatrixDto(project.Id, profile?.Id, (await workers.ListAsync(ct)).Select(worker => WorkerReadinessEvaluator.Evaluate(worker, project, profile, defaults: defaults)).ToArray());
             return Results.Ok(matrix);
         });
 
-        group.MapGet("/{projectId}/validate/worker/{workerId}", async (string projectId, string workerId, string? renderProfileId, IProjectRepository projects, IRenderProfileRepository profiles, IWorkerRepository workers, CancellationToken ct) =>
+        group.MapGet("/{projectId}/validate/worker/{workerId}", async (string projectId, string workerId, string? renderProfileId, IProjectRepository projects, IRenderProfileRepository profiles, IWorkerRepository workers, ISettingsRepository settings, CancellationToken ct) =>
         {
             var project = await projects.GetAsync(projectId, ct);
             var worker = await workers.GetAsync(workerId, ct);
@@ -43,7 +44,8 @@ public static class ProjectEndpoints
             }
 
             var profile = string.IsNullOrWhiteSpace(renderProfileId) ? null : await profiles.GetAsync(renderProfileId, ct);
-            return Results.Ok(WorkerReadinessEvaluator.Evaluate(worker, project, profile));
+            var defaults = await ControllerRenderDefaults.LoadAsync(settings, ct);
+            return Results.Ok(WorkerReadinessEvaluator.Evaluate(worker, project, profile, defaults: defaults));
         });
 
         group.MapPost("/{projectId}/scan", async (string projectId, UnrealProjectScanRequest request, IProjectRepository projects, IUnrealProjectScanner scanner, CancellationToken ct) =>

@@ -58,9 +58,6 @@ Worker example:
   -ControllerUrl http://CONTROLLER_IP:9200 `
   -WorkerId worker-pc-01 `
   -DisplayName "Render Worker 01" `
-  -UnrealSearchRoot "C:\Program Files\Epic Games" `
-  -ProjectPath "D:\Projects\Example\Example.uproject" `
-  -SharedOutputRoot "\\SERVER\RenderFarmOutput" `
   -CreateShortcuts
 ```
 
@@ -77,8 +74,8 @@ Worker example:
 - Windows 10/11.
 - .NET 8 Desktop Runtime, unless using the setup EXE with bundled runtime.
 - Unreal Engine installed for the project version.
-- Access to the `.uproject` path.
-- Read/write access to the shared output root.
+- Access to the controller-supplied `.uproject` path.
+- Read/write access to the controller-supplied shared output root.
 - Firewall/network access to the controller URL.
 
 ## Worker Service
@@ -90,9 +87,6 @@ The visible launcher keeps service setup hidden for now. Worker service setup is
   -ControllerUrl http://CONTROLLER_IP:9200 `
   -WorkerId worker-pc-01 `
   -DisplayName "Render Worker 01" `
-  -UnrealSearchRoot "C:\Program Files\Epic Games" `
-  -ProjectPath "D:\Projects\Example\Example.uproject" `
-  -SharedOutputRoot "\\SERVER\RenderFarmOutput" `
   -Start
 ```
 

@@ -29,6 +29,7 @@ builder.Services.AddSingleton<IRetryPolicy, ConfiguredRetryPolicy>();
 builder.Services.AddSingleton<IUnrealProjectScanner, UnrealProjectScanner>();
 builder.Services.AddSingleton<IJobNotificationSink, WebhookJobNotificationSink>();
 builder.Services.AddSingleton<IJobScheduler, JobScheduler>();
+builder.Services.AddSingleton<IRenderJobValidator, RenderJobValidator>();
 builder.Services.AddHostedService<ControllerDiscoveryService>();
 builder.Services.AddResponseCompression(options =>
 {
@@ -40,7 +41,15 @@ builder.Services.Configure<BrotliCompressionProviderOptions>(options => options.
 builder.Services.Configure<GzipCompressionProviderOptions>(options => options.Level = CompressionLevel.Fastest);
 
 builder.Services.AddHostedService<ControllerStartupRecoveryService>();
+builder.Services.AddHostedService<ControllerLeaseRecoveryService>();
 
+using var controllerInstanceGuard = ControllerSingleInstanceGuard.TryAcquire(out var singleInstanceError);
+if (controllerInstanceGuard is null)
+{
+    Console.Error.WriteLine(singleInstanceError);
+    Environment.ExitCode = 2;
+    return;
+}
 var app = builder.Build();
 try
 {
@@ -69,6 +78,8 @@ app.MapJobEndpoints();
 app.MapSettingsEndpoints();
 
 app.Run();
+
+
 
 
 

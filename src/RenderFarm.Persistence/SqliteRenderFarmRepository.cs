@@ -170,7 +170,7 @@ public sealed class SqliteRenderFarmRepository(IOptions<RenderFarmDatabaseOption
             CREATE TABLE IF NOT EXISTS workers (id TEXT PRIMARY KEY, name TEXT NOT NULL, hostname TEXT NULL, ip_address TEXT NULL, service_url TEXT NULL, status TEXT NOT NULL, stage TEXT NULL, current_job_id TEXT NULL, agent_version TEXT NULL, capabilities_json TEXT NOT NULL, last_error TEXT NULL, registered_at_utc TEXT NOT NULL, last_heartbeat_utc TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, display_name TEXT NOT NULL, uproject_path TEXT NULL, preferred_engine_version TEXT NULL, allowed_engine_versions_json TEXT NOT NULL, shared_output_policy_id TEXT NULL, worker_paths_json TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS render_profiles (id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE, display_name TEXT NOT NULL, type TEXT NOT NULL, asset_path TEXT NULL, command_template TEXT NULL, default_output_type TEXT NOT NULL, supports_chunking INTEGER NOT NULL, settings_json TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE RESTRICT, render_profile_id TEXT NOT NULL REFERENCES render_profiles(id) ON DELETE RESTRICT, name TEXT NOT NULL, state TEXT NOT NULL, priority INTEGER NOT NULL, assigned_worker_id TEXT NULL REFERENCES workers(id) ON DELETE SET NULL, failure_category TEXT NOT NULL, error TEXT NULL, output_directory TEXT NULL, created_at_utc TEXT NOT NULL, updated_at_utc TEXT NOT NULL, queued_at_utc TEXT NULL, started_at_utc TEXT NULL, finished_at_utc TEXT NULL, cancellation_requested INTEGER NOT NULL);
+            CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE RESTRICT, render_profile_id TEXT NOT NULL REFERENCES render_profiles(id) ON DELETE RESTRICT, name TEXT NOT NULL, state TEXT NOT NULL, priority INTEGER NOT NULL, assigned_worker_id TEXT NULL REFERENCES workers(id) ON DELETE SET NULL, failure_category TEXT NOT NULL, error TEXT NULL, output_directory TEXT NULL, validation_json TEXT NULL, created_at_utc TEXT NOT NULL, updated_at_utc TEXT NOT NULL, queued_at_utc TEXT NULL, started_at_utc TEXT NULL, finished_at_utc TEXT NULL, cancellation_requested INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS job_attempts (id TEXT PRIMARY KEY, job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE, attempt_number INTEGER NOT NULL, worker_id TEXT NULL REFERENCES workers(id) ON DELETE SET NULL, state TEXT NOT NULL, failure_category TEXT NOT NULL, error TEXT NULL, command_line TEXT NULL, log_file_path TEXT NULL, started_at_utc TEXT NOT NULL, finished_at_utc TEXT NULL, exit_code INTEGER NULL);
             CREATE TABLE IF NOT EXISTS job_leases (id TEXT PRIMARY KEY, job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE, job_attempt_id TEXT NOT NULL REFERENCES job_attempts(id) ON DELETE CASCADE, worker_id TEXT NOT NULL REFERENCES workers(id) ON DELETE RESTRICT, acquired_at_utc TEXT NOT NULL, expires_at_utc TEXT NOT NULL, renewed_at_utc TEXT NULL, released_at_utc TEXT NULL, release_reason TEXT NULL, is_active INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS job_events (id TEXT PRIMARY KEY, job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE, job_attempt_id TEXT NULL REFERENCES job_attempts(id) ON DELETE SET NULL, worker_id TEXT NULL REFERENCES workers(id) ON DELETE SET NULL, state TEXT NULL, failure_category TEXT NOT NULL, message TEXT NOT NULL, created_at_utc TEXT NOT NULL, data_json TEXT NULL);
@@ -186,8 +186,29 @@ public sealed class SqliteRenderFarmRepository(IOptions<RenderFarmDatabaseOption
             INSERT OR IGNORE INTO schema_migrations (version, name, applied_at_utc) VALUES (1, 'baseline-schema-and-indexes', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
             """;
         await command.ExecuteNonQueryAsync(cancellationToken);
+        await EnsureColumnAsync(connection, "jobs", "validation_json", "TEXT NULL", cancellationToken);
     }
 
+
+    private static async Task EnsureColumnAsync(SqliteConnection connection, string tableName, string columnName, string columnDefinition, CancellationToken cancellationToken)
+    {
+        await using var check = connection.CreateCommand();
+        check.CommandText = $"PRAGMA table_info({tableName})";
+        await using (var reader = await check.ExecuteReaderAsync(cancellationToken))
+        {
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                if (string.Equals(reader.GetString(1), columnName, StringComparison.OrdinalIgnoreCase))
+                {
+                    return;
+                }
+            }
+        }
+
+        await using var alter = connection.CreateCommand();
+        alter.CommandText = $"ALTER TABLE {tableName} ADD COLUMN {columnName} {columnDefinition}";
+        await alter.ExecuteNonQueryAsync(cancellationToken);
+    }
     async Task IWorkerRepository.UpsertAsync(Worker worker, CancellationToken cancellationToken)
     {
         await using var connection = await OpenConnectionAsync(cancellationToken);
@@ -311,9 +332,9 @@ public sealed class SqliteRenderFarmRepository(IOptions<RenderFarmDatabaseOption
         await using var connection = await OpenConnectionAsync(cancellationToken);
         await using var command = connection.CreateCommand();
         command.CommandText = """
-            INSERT INTO jobs (id, project_id, render_profile_id, name, state, priority, assigned_worker_id, failure_category, error, output_directory, created_at_utc, updated_at_utc, queued_at_utc, started_at_utc, finished_at_utc, cancellation_requested)
-            VALUES ($id, $project_id, $render_profile_id, $name, $state, $priority, $assigned_worker_id, $failure_category, $error, $output_directory, $created_at_utc, $updated_at_utc, $queued_at_utc, $started_at_utc, $finished_at_utc, $cancellation_requested)
-            ON CONFLICT(id) DO UPDATE SET project_id = excluded.project_id, render_profile_id = excluded.render_profile_id, name = excluded.name, state = excluded.state, priority = excluded.priority, assigned_worker_id = excluded.assigned_worker_id, failure_category = excluded.failure_category, error = excluded.error, output_directory = excluded.output_directory, updated_at_utc = excluded.updated_at_utc, queued_at_utc = excluded.queued_at_utc, started_at_utc = excluded.started_at_utc, finished_at_utc = excluded.finished_at_utc, cancellation_requested = excluded.cancellation_requested;
+            INSERT INTO jobs (id, project_id, render_profile_id, name, state, priority, assigned_worker_id, failure_category, error, output_directory, validation_json, created_at_utc, updated_at_utc, queued_at_utc, started_at_utc, finished_at_utc, cancellation_requested)
+            VALUES ($id, $project_id, $render_profile_id, $name, $state, $priority, $assigned_worker_id, $failure_category, $error, $output_directory, $validation_json, $created_at_utc, $updated_at_utc, $queued_at_utc, $started_at_utc, $finished_at_utc, $cancellation_requested)
+            ON CONFLICT(id) DO UPDATE SET project_id = excluded.project_id, render_profile_id = excluded.render_profile_id, name = excluded.name, state = excluded.state, priority = excluded.priority, assigned_worker_id = excluded.assigned_worker_id, failure_category = excluded.failure_category, error = excluded.error, output_directory = excluded.output_directory, validation_json = excluded.validation_json, updated_at_utc = excluded.updated_at_utc, queued_at_utc = excluded.queued_at_utc, started_at_utc = excluded.started_at_utc, finished_at_utc = excluded.finished_at_utc, cancellation_requested = excluded.cancellation_requested;
             """;
         AddJobParameters(command, job);
         await command.ExecuteNonQueryAsync(cancellationToken);
@@ -653,9 +674,9 @@ public sealed class SqliteRenderFarmRepository(IOptions<RenderFarmDatabaseOption
         await using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = """
-            INSERT INTO jobs (id, project_id, render_profile_id, name, state, priority, assigned_worker_id, failure_category, error, output_directory, created_at_utc, updated_at_utc, queued_at_utc, started_at_utc, finished_at_utc, cancellation_requested)
-            VALUES ($id, $project_id, $render_profile_id, $name, $state, $priority, $assigned_worker_id, $failure_category, $error, $output_directory, $created_at_utc, $updated_at_utc, $queued_at_utc, $started_at_utc, $finished_at_utc, $cancellation_requested)
-            ON CONFLICT(id) DO UPDATE SET project_id = excluded.project_id, render_profile_id = excluded.render_profile_id, name = excluded.name, state = excluded.state, priority = excluded.priority, assigned_worker_id = excluded.assigned_worker_id, failure_category = excluded.failure_category, error = excluded.error, output_directory = excluded.output_directory, updated_at_utc = excluded.updated_at_utc, queued_at_utc = excluded.queued_at_utc, started_at_utc = excluded.started_at_utc, finished_at_utc = excluded.finished_at_utc, cancellation_requested = excluded.cancellation_requested;
+            INSERT INTO jobs (id, project_id, render_profile_id, name, state, priority, assigned_worker_id, failure_category, error, output_directory, validation_json, created_at_utc, updated_at_utc, queued_at_utc, started_at_utc, finished_at_utc, cancellation_requested)
+            VALUES ($id, $project_id, $render_profile_id, $name, $state, $priority, $assigned_worker_id, $failure_category, $error, $output_directory, $validation_json, $created_at_utc, $updated_at_utc, $queued_at_utc, $started_at_utc, $finished_at_utc, $cancellation_requested)
+            ON CONFLICT(id) DO UPDATE SET project_id = excluded.project_id, render_profile_id = excluded.render_profile_id, name = excluded.name, state = excluded.state, priority = excluded.priority, assigned_worker_id = excluded.assigned_worker_id, failure_category = excluded.failure_category, error = excluded.error, output_directory = excluded.output_directory, validation_json = excluded.validation_json, updated_at_utc = excluded.updated_at_utc, queued_at_utc = excluded.queued_at_utc, started_at_utc = excluded.started_at_utc, finished_at_utc = excluded.finished_at_utc, cancellation_requested = excluded.cancellation_requested;
             """;
         AddJobParameters(command, job);
         await command.ExecuteNonQueryAsync(cancellationToken);
@@ -719,7 +740,7 @@ public sealed class SqliteRenderFarmRepository(IOptions<RenderFarmDatabaseOption
 
     private static void AddJobParameters(SqliteCommand command, RenderJob job)
     {
-        Add(command, "$id", job.Id); Add(command, "$project_id", job.ProjectId); Add(command, "$render_profile_id", job.RenderProfileId); Add(command, "$name", job.Name); Add(command, "$state", job.State.ToString()); Add(command, "$priority", job.Priority); Add(command, "$assigned_worker_id", job.AssignedWorkerId); Add(command, "$failure_category", job.FailureCategory.ToString()); Add(command, "$error", job.Error); Add(command, "$output_directory", job.OutputDirectory); Add(command, "$created_at_utc", Format(job.CreatedAtUtc)); Add(command, "$updated_at_utc", Format(job.UpdatedAtUtc)); Add(command, "$queued_at_utc", FormatNullable(job.QueuedAtUtc)); Add(command, "$started_at_utc", FormatNullable(job.StartedAtUtc)); Add(command, "$finished_at_utc", FormatNullable(job.FinishedAtUtc)); Add(command, "$cancellation_requested", job.CancellationRequested ? 1 : 0);
+        Add(command, "$id", job.Id); Add(command, "$project_id", job.ProjectId); Add(command, "$render_profile_id", job.RenderProfileId); Add(command, "$name", job.Name); Add(command, "$state", job.State.ToString()); Add(command, "$priority", job.Priority); Add(command, "$assigned_worker_id", job.AssignedWorkerId); Add(command, "$failure_category", job.FailureCategory.ToString()); Add(command, "$error", job.Error); Add(command, "$output_directory", job.OutputDirectory); Add(command, "$validation_json", job.ValidationJson); Add(command, "$created_at_utc", Format(job.CreatedAtUtc)); Add(command, "$updated_at_utc", Format(job.UpdatedAtUtc)); Add(command, "$queued_at_utc", FormatNullable(job.QueuedAtUtc)); Add(command, "$started_at_utc", FormatNullable(job.StartedAtUtc)); Add(command, "$finished_at_utc", FormatNullable(job.FinishedAtUtc)); Add(command, "$cancellation_requested", job.CancellationRequested ? 1 : 0);
     }
 
     private static void AddAttemptParameters(SqliteCommand command, JobAttempt attempt)
@@ -743,7 +764,7 @@ public sealed class SqliteRenderFarmRepository(IOptions<RenderFarmDatabaseOption
 
     private static RenderProfile ReadProfile(SqliteDataReader reader) => new(GetString(reader, "id"), GetString(reader, "project_id"), GetString(reader, "display_name"), ParseEnum(GetString(reader, "type"), RenderProfileType.Manual), GetNullableString(reader, "asset_path"), GetNullableString(reader, "command_template"), GetString(reader, "default_output_type"), GetInt64(reader, "supports_chunking") == 1, FromJson<IReadOnlyDictionary<string, string>>(GetString(reader, "settings_json"), new Dictionary<string, string>()));
 
-    private static RenderJob ReadJob(SqliteDataReader reader) => new(GetString(reader, "id"), GetString(reader, "project_id"), GetString(reader, "render_profile_id"), GetString(reader, "name"), ParseEnum(GetString(reader, "state"), JobState.Created), (int)GetInt64(reader, "priority"), GetNullableString(reader, "assigned_worker_id"), ParseEnum(GetString(reader, "failure_category"), FailureCategory.None), GetNullableString(reader, "error"), GetNullableString(reader, "output_directory"), ParseDate(GetString(reader, "created_at_utc")), ParseDate(GetString(reader, "updated_at_utc")), ParseNullableDate(GetNullableString(reader, "queued_at_utc")), ParseNullableDate(GetNullableString(reader, "started_at_utc")), ParseNullableDate(GetNullableString(reader, "finished_at_utc")), GetInt64(reader, "cancellation_requested") == 1);
+    private static RenderJob ReadJob(SqliteDataReader reader) => new(GetString(reader, "id"), GetString(reader, "project_id"), GetString(reader, "render_profile_id"), GetString(reader, "name"), ParseEnum(GetString(reader, "state"), JobState.Created), (int)GetInt64(reader, "priority"), GetNullableString(reader, "assigned_worker_id"), ParseEnum(GetString(reader, "failure_category"), FailureCategory.None), GetNullableString(reader, "error"), GetNullableString(reader, "output_directory"), ParseDate(GetString(reader, "created_at_utc")), ParseDate(GetString(reader, "updated_at_utc")), ParseNullableDate(GetNullableString(reader, "queued_at_utc")), ParseNullableDate(GetNullableString(reader, "started_at_utc")), ParseNullableDate(GetNullableString(reader, "finished_at_utc")), GetInt64(reader, "cancellation_requested") == 1, GetNullableString(reader, "validation_json"));
 
     private static JobAttempt ReadAttempt(SqliteDataReader reader) => new(GetString(reader, "id"), GetString(reader, "job_id"), (int)GetInt64(reader, "attempt_number"), GetNullableString(reader, "worker_id"), ParseEnum(GetString(reader, "state"), JobState.Created), ParseEnum(GetString(reader, "failure_category"), FailureCategory.None), GetNullableString(reader, "error"), GetNullableString(reader, "command_line"), GetNullableString(reader, "log_file_path"), ParseDate(GetString(reader, "started_at_utc")), ParseNullableDate(GetNullableString(reader, "finished_at_utc")), GetNullableInt(reader, "exit_code"));
 
@@ -778,6 +799,8 @@ public sealed class SqliteRenderFarmRepository(IOptions<RenderFarmDatabaseOption
         return reader.IsDBNull(ordinal) ? null : reader.GetInt32(ordinal);
     }
 }
+
+
 
 
 

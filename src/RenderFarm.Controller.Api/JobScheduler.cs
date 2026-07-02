@@ -13,6 +13,7 @@ public sealed class JobSchedulerOptions
     public int LeaseSeconds { get; set; } = 120;
     public int MaxAttempts { get; set; } = 3;
     public int RetryDelaySeconds { get; set; }
+    public int LeaseRecoverySeconds { get; set; } = 15;
     public double RetryBackoffMultiplier { get; set; } = 1;
     public Dictionary<string, FailureRetryPolicyOptions> FailurePolicies { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 }
@@ -108,6 +109,7 @@ public sealed class ConfiguredRetryPolicy(Microsoft.Extensions.Options.IOptions<
 public interface IJobScheduler
 {
     Task<RenderJob> CreateJobAsync(CreateRenderJobRequest request, CancellationToken cancellationToken);
+    Task<RenderJobDto?> RetryFailedJobAsNewAsync(string sourceJobId, CancellationToken cancellationToken);
     Task<JobAssignmentDto> RequestJobAsync(string workerId, CancellationToken cancellationToken);
     Task<JobLeaseDto?> RenewLeaseAsync(string jobId, JobLeaseRenewalRequest request, CancellationToken cancellationToken);
     Task<RenderJobDto?> StartJobAsync(string jobId, JobStartRequest request, CancellationToken cancellationToken);
@@ -169,12 +171,58 @@ public sealed class JobScheduler(
         return job;
     }
 
+    public async Task<RenderJobDto?> RetryFailedJobAsNewAsync(string sourceJobId, CancellationToken cancellationToken)
+    {
+        await _sync.WaitAsync(cancellationToken);
+        try
+        {
+            var source = await jobs.GetAsync(sourceJobId, cancellationToken);
+            if (source is null)
+            {
+                return null;
+            }
+
+            if (source.State != JobState.Failed)
+            {
+                throw new InvalidOperationException($"Only terminal failed jobs can be retried as a new job. Current state is {source.State}.");
+            }
+
+            var now = DateTimeOffset.UtcNow;
+            var retryJob = source with
+            {
+                Id = Guid.NewGuid().ToString("N"),
+                Name = source.Name.EndsWith(" retry", StringComparison.OrdinalIgnoreCase) ? source.Name : source.Name + " retry",
+                State = JobState.Queued,
+                AssignedWorkerId = null,
+                FailureCategory = FailureCategory.None,
+                Error = null,
+                CreatedAtUtc = now,
+                UpdatedAtUtc = now,
+                QueuedAtUtc = now,
+                StartedAtUtc = null,
+                FinishedAtUtc = null,
+                CancellationRequested = false
+            };
+
+            var retryData = JsonSerializer.Serialize(new { sourceJobId = source.Id, retryJobId = retryJob.Id, action = "RetryAsNewJob" }, RenderFarmJson.SerializerOptions);
+            await schedulerState.ApplyAsync(new SchedulerStateMutation(
+                Job: retryJob,
+                Event: CreateEvent(retryJob.Id, null, null, JobState.Queued, FailureCategory.None, $"Retry job created from failed source job {source.Id}", retryData)), cancellationToken);
+            await AppendEventAsync(source.Id, null, source.AssignedWorkerId, source.State, source.FailureCategory, $"Operator retry created new queued job {retryJob.Id}", retryData, cancellationToken);
+            return retryJob.ToDto();
+        }
+        finally
+        {
+            _sync.Release();
+        }
+    }
     public async Task<JobAssignmentDto> RequestJobAsync(string workerId, CancellationToken cancellationToken)
     {
         await _sync.WaitAsync(cancellationToken);
         try
         {
             await ExpireLeasesCoreAsync(cancellationToken);
+            await PromoteDueRetriesAsync(cancellationToken);
             var worker = await workers.GetAsync(workerId, cancellationToken);
             if (worker is null)
             {
@@ -192,6 +240,7 @@ public sealed class JobScheduler(
                 return new(false, null, null, null, $"Worker scheduling mode {schedulingMode} does not allow new assignments.");
             }
 
+            var defaults = await ControllerRenderDefaults.LoadAsync(settings, cancellationToken);
             foreach (var job in (await jobs.ListAsync(cancellationToken)).Where(x => x.State == JobState.Queued && (x.QueuedAtUtc is null || x.QueuedAtUtc <= DateTimeOffset.UtcNow)).OrderByDescending(x => x.Priority).ThenBy(x => x.CreatedAtUtc))
             {
                 if (await leases.GetActiveForJobAsync(job.Id, cancellationToken) is not null)
@@ -199,8 +248,17 @@ public sealed class JobScheduler(
                     continue;
                 }
 
-                if (!await IsSuitableAsync(worker, job, cancellationToken))
+                var project = await projects.GetAsync(job.ProjectId, cancellationToken);
+                var profile = await profiles.GetAsync(job.RenderProfileId, cancellationToken);
+                if (project is null || profile is null || profile.ProjectId != project.Id)
                 {
+                    continue;
+                }
+
+                var readiness = WorkerReadinessEvaluator.Evaluate(worker, project, profile, job.OutputDirectory, defaults);
+                if (!readiness.CanRun)
+                {
+                    logger?.LogDebug("Worker {WorkerId} is not ready for job {JobId}: {Reasons}", worker.Id, job.Id, string.Join("; ", readiness.Reasons));
                     continue;
                 }
 
@@ -240,14 +298,24 @@ public sealed class JobScheduler(
                     UpdatedAtUtc = now
                 };
 
+                RenderExecutionDto execution;
+                try
+                {
+                    execution = BuildExecutionPayload(worker, reservedJob, attempt, project, profile, defaults);
+                }
+                catch (InvalidOperationException ex)
+                {
+                    logger?.LogWarning(ex, "Controller could not resolve execution payload for job {JobId} and worker {WorkerId}", job.Id, worker.Id);
+                    continue;
+                }
+
                 await schedulerState.ApplyAsync(new SchedulerStateMutation(
                     Job: reservedJob,
                     Attempt: attempt,
                     Lease: lease,
-                    Event: CreateEvent(job.Id, attempt.Id, worker.Id, JobState.Reserved, FailureCategory.None, $"Job reserved by worker {worker.Id}", null)), cancellationToken);
-                return new(true, reservedJob.ToDto(), attempt.ToDto(), lease.ToDto(), "Job assigned.");
+                    Event: CreateEvent(job.Id, attempt.Id, worker.Id, JobState.Reserved, FailureCategory.None, $"Job reserved by worker {worker.Id}", JsonSerializer.Serialize(execution, RenderFarmJson.SerializerOptions))), cancellationToken);
+                return new(true, reservedJob.ToDto(), attempt.ToDto(), lease.ToDto(), "Job assigned.", execution);
             }
-
             return new(false, null, null, null, "No suitable queued job is available.");
         }
         finally
@@ -453,7 +521,9 @@ public sealed class JobScheduler(
         await _sync.WaitAsync(cancellationToken);
         try
         {
-            return await ExpireLeasesCoreAsync(cancellationToken);
+            var expired = await ExpireLeasesCoreAsync(cancellationToken);
+            await PromoteDueRetriesAsync(cancellationToken);
+            return expired;
         }
         finally
         {
@@ -467,6 +537,7 @@ public sealed class JobScheduler(
         try
         {
             var recovered = await ExpireLeasesCoreAsync(cancellationToken);
+            await PromoteDueRetriesAsync(cancellationToken);
             recovered += await RecoverJobsWithoutActiveLeasesAsync(cancellationToken);
             return recovered;
         }
@@ -600,19 +671,159 @@ public sealed class JobScheduler(
         return lease;
     }
 
-    private async Task<bool> IsSuitableAsync(Worker worker, RenderJob job, CancellationToken cancellationToken)
+    private RenderExecutionDto BuildExecutionPayload(Worker worker, RenderJob job, JobAttempt attempt, ProjectProfile project, RenderProfile profile, RenderDefaultsDto defaults)
     {
-        var project = await projects.GetAsync(job.ProjectId, cancellationToken);
-        var profile = await profiles.GetAsync(job.RenderProfileId, cancellationToken);
-        if (project is null || profile is null || profile.ProjectId != project.Id)
+        var workerPath = project.WorkerPaths.FirstOrDefault(x => string.Equals(x.WorkerId, worker.Id, StringComparison.OrdinalIgnoreCase));
+        var projectPath = FirstNonEmpty(
+            workerPath?.ProjectPath,
+            GetSetting(profile, "projectPath"),
+            GetSetting(profile, "uprojectPath"),
+            project.UProjectPath);
+        if (string.IsNullOrWhiteSpace(projectPath))
         {
-            return false;
+            throw new InvalidOperationException("No project .uproject path is configured for the selected project or worker mapping.");
         }
 
-        var readiness = WorkerReadinessEvaluator.Evaluate(worker, project, profile, job.OutputDirectory);
-        return readiness.CanRun;
+        var unrealExecutable = FirstNonEmpty(
+            ResolveUnrealExecutableCandidate(workerPath?.EnginePath),
+            ResolveUnrealExecutableCandidate(GetSetting(profile, "unrealExecutablePath")),
+            ResolveUnrealExecutableCandidate(GetSetting(profile, "unrealExe")),
+            ResolveUnrealExecutableCandidate(GetSetting(profile, "unrealCommand")),
+            ResolveUnrealExecutableCandidate(GetSetting(profile, "unrealSearchRoot")),
+            ResolveUnrealExecutableCandidate(defaults.UnrealExecutablePath),
+            ResolveUnrealExecutableCandidate(defaults.UnrealSearchRoot),
+            ResolveReportedUnrealExecutable(worker, project));
+        if (string.IsNullOrWhiteSpace(unrealExecutable))
+        {
+            throw new InvalidOperationException("No Unreal executable is configured by the controller and the worker has not reported a usable Unreal installation.");
+        }
+
+        var outputRoot = FirstNonEmpty(
+            GetSetting(profile, "defaultOutputRoot"),
+            GetSetting(profile, "outputRoot"),
+            defaults.SharedOutputRoot,
+            worker.Capabilities.SharedOutputRoots.FirstOrDefault(root => root.Exists && root.Writable)?.Path,
+            Path.Combine(AppContext.BaseDirectory, "renders"));
+
+        var seedVariables = BuildExecutionVariables(worker, job, attempt, project, profile, projectPath, unrealExecutable, outputRoot, string.Empty, string.Empty);
+        var configuredOutput = FirstNonEmpty(
+            job.OutputDirectory,
+            GetSetting(profile, "outputDirectory"),
+            GetSetting(profile, "defaultOutputDirectory"));
+        var outputDirectory = string.IsNullOrWhiteSpace(configuredOutput)
+            ? Path.Combine(ExpandTemplateValue(outputRoot, seedVariables), ExpandTemplateValue(FirstNonEmpty(GetSetting(profile, "outputSubfolderPattern"), defaults.OutputSubfolderPattern, "{JobId}"), seedVariables))
+            : ExpandTemplateValue(configuredOutput, seedVariables);
+        outputDirectory = Environment.ExpandEnvironmentVariables(outputDirectory.Trim());
+
+        var logDirectory = Environment.ExpandEnvironmentVariables(ExpandTemplateValue(FirstNonEmpty(
+            workerPath?.LogDirectory,
+            GetSetting(profile, "logDirectory"),
+            Path.Combine(outputDirectory, "logs")), seedVariables).Trim());
+        var variables = BuildExecutionVariables(worker, job, attempt, project, profile, projectPath, unrealExecutable, outputRoot, outputDirectory, logDirectory);
+        var timeoutSeconds = TryGetInt(GetSetting(profile, "timeoutSeconds")) ?? TryGetInt(GetSetting(profile, "renderTimeoutSeconds"));
+
+        return new RenderExecutionDto(
+            unrealExecutable,
+            projectPath,
+            profile.ToDto(),
+            outputDirectory,
+            logDirectory,
+            variables,
+            timeoutSeconds);
     }
 
+    private static Dictionary<string, string> BuildExecutionVariables(Worker worker, RenderJob job, JobAttempt attempt, ProjectProfile project, RenderProfile profile, string projectPath, string unrealExecutable, string outputRoot, string outputDirectory, string logDirectory)
+    {
+        var variables = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        Add("ProjectPath", projectPath);
+        Add("ProjectDir", Path.GetDirectoryName(projectPath) ?? string.Empty);
+        Add("UnrealExe", unrealExecutable);
+        Add("OutputRoot", outputRoot);
+        Add("OutputFolder", string.IsNullOrWhiteSpace(outputDirectory) ? string.Empty : Path.GetFileName(outputDirectory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)));
+        Add("OutputDirectory", outputDirectory);
+        Add("LogDirectory", logDirectory);
+        Add("JobId", job.Id);
+        Add("JobName", job.Name);
+        Add("AttemptId", attempt.Id);
+        Add("AttemptNumber", attempt.AttemptNumber.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        Add("ProjectId", project.Id);
+        Add("ProjectName", project.DisplayName);
+        Add("ProfileId", profile.Id);
+        Add("ProfileName", profile.DisplayName);
+        Add("WorkerId", worker.Id);
+        Add("WorkerName", worker.Name);
+        Add("Map", FirstNonEmpty(GetSetting(profile, "map"), GetSetting(profile, "mapName"), GetSetting(profile, "level"), GetSetting(profile, "levelName")));
+        Add("Sequence", FirstNonEmpty(GetSetting(profile, "sequence"), GetSetting(profile, "levelSequence")));
+        Add("RenderConfig", FirstNonEmpty(profile.AssetPath, GetSetting(profile, "moviePipelineConfig"), GetSetting(profile, "mrqConfig"), GetSetting(profile, "queue")));
+        Add("MoviePipelineConfig", FirstNonEmpty(profile.AssetPath, GetSetting(profile, "moviePipelineConfig"), GetSetting(profile, "mrqConfig"), GetSetting(profile, "queue")));
+        return variables;
+
+        void Add(string key, string? value) => variables[key] = value ?? string.Empty;
+    }
+
+    private static string ExpandTemplateValue(string value, IReadOnlyDictionary<string, string> variables)
+    {
+        var expanded = Environment.ExpandEnvironmentVariables(value);
+        foreach (var variable in variables)
+        {
+            expanded = expanded.Replace("{" + variable.Key + "}", variable.Value, StringComparison.OrdinalIgnoreCase);
+        }
+
+        return expanded;
+    }
+
+    private static string? ResolveUnrealExecutableCandidate(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return null;
+        }
+
+        var candidate = Environment.ExpandEnvironmentVariables(value.Trim().Trim('"'));
+        if (candidate.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+        {
+            return candidate;
+        }
+
+        if (string.Equals(Path.GetFileName(candidate), "Engine", StringComparison.OrdinalIgnoreCase))
+        {
+            return Path.Combine(candidate, "Binaries", "Win64", "UnrealEditor-Cmd.exe");
+        }
+
+        return Path.Combine(candidate, "Engine", "Binaries", "Win64", "UnrealEditor-Cmd.exe");
+    }
+
+    private static string? ResolveReportedUnrealExecutable(Worker worker, ProjectProfile project)
+    {
+        var desiredVersions = new[] { project.PreferredEngineVersion }
+            .Concat(project.AllowedEngineVersions)
+            .Where(x => !string.IsNullOrWhiteSpace(x))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        var installs = worker.Capabilities.UnrealInstallations.Where(install => install.Exists).ToArray();
+        if (desiredVersions.Length == 0)
+        {
+            return installs.LastOrDefault()?.ExecutablePath;
+        }
+
+        return installs.FirstOrDefault(install => desiredVersions.Contains(install.Version, StringComparer.OrdinalIgnoreCase))?.ExecutablePath;
+    }
+
+    private static string? GetSetting(RenderProfile? profile, string key)
+    {
+        if (profile is null)
+        {
+            return null;
+        }
+
+        return profile.Settings.TryGetValue(key, out var exact)
+            ? exact
+            : profile.Settings.FirstOrDefault(x => string.Equals(x.Key, key, StringComparison.OrdinalIgnoreCase)).Value;
+    }
+
+    private static int? TryGetInt(string? value) => int.TryParse(value, out var parsed) ? parsed : null;
+
+    private static string FirstNonEmpty(params string?[] values) => values.FirstOrDefault(x => !string.IsNullOrWhiteSpace(x)) ?? string.Empty;
     private static bool IsWorkerAvailable(Worker worker) => worker.Status is WorkerStatus.Online or WorkerStatus.Idle;
 
     private static bool IsTerminal(JobState state) => JobStateMachine.IsTerminal(state);
@@ -650,3 +861,4 @@ public sealed class JobScheduler(
     private Task AppendEventAsync(string jobId, string? attemptId, string? workerId, JobState? state, FailureCategory category, string message, string? dataJson, CancellationToken cancellationToken) =>
         events.AppendAsync(CreateEvent(jobId, attemptId, workerId, state, category, message, dataJson), cancellationToken);
 }
+

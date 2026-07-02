@@ -1,3 +1,4 @@
+using System.Text.Json;
 using RenderFarm.Domain;
 
 namespace RenderFarm.Shared;
@@ -157,6 +158,27 @@ public sealed record PreparedRenderRequestDto(
     string AttemptId);
 
 /// <summary>
+/// Controller-owned render defaults used when a project, render profile, or queued job does not override a value.
+/// </summary>
+public sealed record RenderDefaultsDto(
+    string? UnrealExecutablePath,
+    string? UnrealSearchRoot,
+    string? SharedOutputRoot,
+    string? OutputSubfolderPattern);
+
+/// <summary>
+/// Fully resolved execution data sent by the controller to a worker with a job assignment.
+/// </summary>
+public sealed record RenderExecutionDto(
+    string UnrealExecutablePath,
+    string ProjectPath,
+    RenderProfileDto RenderProfile,
+    string OutputDirectory,
+    string LogDirectory,
+    IReadOnlyDictionary<string, string> Variables,
+    int? TimeoutSeconds = null);
+
+/// <summary>
 /// Output of render preparation.
 /// </summary>
 public sealed record RenderPreparationResultDto(bool Ok, string RequestJsonPath, PreparedRenderRequestDto Request, string? Error);
@@ -164,7 +186,7 @@ public sealed record RenderPreparationResultDto(bool Ok, string RequestJsonPath,
 /// <summary>
 /// Summary of files produced by a render attempt.
 /// </summary>
-public sealed record RenderArtifactSummaryDto(string OutputDirectory, int FileCount, long TotalBytes, IReadOnlyList<string> SampleFiles);
+public sealed record RenderArtifactSummaryDto(string OutputDirectory, int FileCount, long TotalBytes, IReadOnlyList<string> SampleFiles, IReadOnlyList<string>? DetectedExtensions = null);
 
 /// <summary>
 /// Generic terminal job notification payload sent by the controller webhook sink.
@@ -216,6 +238,68 @@ public sealed record RenderProfileDto(
     IReadOnlyDictionary<string, string> Settings);
 
 /// <summary>
+/// Severity level for render validation messages shown before queueing and in job details.
+/// </summary>
+public enum RenderValidationSeverity
+{
+    Info,
+    Warning,
+    Error
+}
+
+/// <summary>
+/// Overall readiness state from fast or deep render validation.
+/// </summary>
+public enum RenderValidationStatus
+{
+    Ready,
+    NeedsAttention,
+    Blocked
+}
+
+/// <summary>
+/// One validation finding with an optional safe automatic fix.
+/// </summary>
+public sealed record RenderValidationIssueDto(
+    string Code,
+    RenderValidationSeverity Severity,
+    string Message,
+    string? Field = null,
+    string? Fix = null,
+    string? OriginalValue = null,
+    string? FixedValue = null,
+    bool AutoFixAvailable = false);
+
+/// <summary>
+/// Validation result stored on a render job and returned by validation endpoints.
+/// </summary>
+public sealed record RenderValidationResultDto(
+    RenderValidationStatus Status,
+    string Scope,
+    bool DeepValidationRan,
+    string Summary,
+    string? CommandPreview,
+    IReadOnlyList<RenderValidationIssueDto> Issues);
+
+/// <summary>
+/// Human-readable diagnostic extracted from Unreal stdout, stderr, or saved log text.
+/// </summary>
+public sealed record RenderLogDiagnosticDto(
+    string Code,
+    string Severity,
+    string Message,
+    string? Evidence = null,
+    string? Fix = null);
+
+/// <summary>
+/// Structured classification of recent render log output.
+/// </summary>
+public sealed record RenderLogClassificationDto(
+    IReadOnlyList<RenderLogDiagnosticDto> Diagnostics,
+    IReadOnlyList<string> LoadErrors,
+    string? MoviePipelineConfigValue,
+    string? RawExcerpt);
+/// <summary>
 /// Render job DTO used by controller APIs.
 /// </summary>
 public sealed record RenderJobDto(
@@ -234,7 +318,8 @@ public sealed record RenderJobDto(
     DateTimeOffset? QueuedAtUtc,
     DateTimeOffset? StartedAtUtc,
     DateTimeOffset? FinishedAtUtc,
-    bool CancellationRequested);
+    bool CancellationRequested,
+    RenderValidationResultDto? Validation = null);
 
 /// <summary>
 /// Job attempt DTO used by controller APIs.
@@ -322,7 +407,8 @@ public sealed record JobAssignmentDto(
     RenderJobDto? Job,
     JobAttemptDto? Attempt,
     JobLeaseDto? Lease,
-    string Message);
+    string Message,
+    RenderExecutionDto? Execution = null);
 
 /// <summary>
 /// Request to extend an active job lease.
@@ -484,9 +570,9 @@ public static class RenderFarmContractMapper
 
     public static RenderProfileDto ToDto(this RenderProfile profile) => new(profile.Id, profile.ProjectId, profile.DisplayName, profile.Type, profile.AssetPath, profile.CommandTemplate, profile.DefaultOutputType, profile.SupportsChunking, profile.Settings);
 
-    public static RenderJob ToDomain(this RenderJobDto dto) => new(dto.Id, dto.ProjectId, dto.RenderProfileId, dto.Name, dto.State, dto.Priority, dto.AssignedWorkerId, dto.FailureCategory, dto.Error, dto.OutputDirectory, dto.CreatedAtUtc, dto.UpdatedAtUtc, dto.QueuedAtUtc, dto.StartedAtUtc, dto.FinishedAtUtc, dto.CancellationRequested);
+    public static RenderJob ToDomain(this RenderJobDto dto) => new(dto.Id, dto.ProjectId, dto.RenderProfileId, dto.Name, dto.State, dto.Priority, dto.AssignedWorkerId, dto.FailureCategory, dto.Error, dto.OutputDirectory, dto.CreatedAtUtc, dto.UpdatedAtUtc, dto.QueuedAtUtc, dto.StartedAtUtc, dto.FinishedAtUtc, dto.CancellationRequested, SerializeValidation(dto.Validation));
 
-    public static RenderJobDto ToDto(this RenderJob job) => new(job.Id, job.ProjectId, job.RenderProfileId, job.Name, job.State, job.Priority, job.AssignedWorkerId, job.FailureCategory, job.Error, job.OutputDirectory, job.CreatedAtUtc, job.UpdatedAtUtc, job.QueuedAtUtc, job.StartedAtUtc, job.FinishedAtUtc, job.CancellationRequested);
+    public static RenderJobDto ToDto(this RenderJob job) => new(job.Id, job.ProjectId, job.RenderProfileId, job.Name, job.State, job.Priority, job.AssignedWorkerId, job.FailureCategory, job.Error, job.OutputDirectory, job.CreatedAtUtc, job.UpdatedAtUtc, job.QueuedAtUtc, job.StartedAtUtc, job.FinishedAtUtc, job.CancellationRequested, DeserializeValidation(job.ValidationJson));
 
     public static JobAttempt ToDomain(this JobAttemptDto dto) => new(dto.Id, dto.JobId, dto.AttemptNumber, dto.WorkerId, dto.State, dto.FailureCategory, dto.Error, dto.CommandLine, dto.LogFilePath, dto.StartedAtUtc, dto.FinishedAtUtc, dto.ExitCode);
 
@@ -499,5 +585,37 @@ public static class RenderFarmContractMapper
     public static JobLease ToDomain(this JobLeaseDto dto) => new(dto.Id, dto.JobId, dto.JobAttemptId, dto.WorkerId, dto.AcquiredAtUtc, dto.ExpiresAtUtc, dto.RenewedAtUtc, dto.ReleasedAtUtc, dto.ReleaseReason, dto.IsActive);
 
     public static JobLeaseDto ToDto(this JobLease lease) => new(lease.Id, lease.JobId, lease.JobAttemptId, lease.WorkerId, lease.AcquiredAtUtc, lease.ExpiresAtUtc, lease.RenewedAtUtc, lease.ReleasedAtUtc, lease.ReleaseReason, lease.IsActive);
+
+    private static string? SerializeValidation(RenderValidationResultDto? validation) =>
+        validation is null ? null : JsonSerializer.Serialize(validation, RenderFarmJson.SerializerOptions);
+
+    private static RenderValidationResultDto? DeserializeValidation(string? validationJson)
+    {
+        if (string.IsNullOrWhiteSpace(validationJson))
+        {
+            return null;
+        }
+
+        try
+        {
+            return JsonSerializer.Deserialize<RenderValidationResultDto>(validationJson, RenderFarmJson.SerializerOptions);
+        }
+        catch (JsonException)
+        {
+            return new RenderValidationResultDto(
+                RenderValidationStatus.NeedsAttention,
+                "fast",
+                false,
+                "Stored validation data could not be read. Revalidate before retrying this render.",
+                null,
+                [new RenderValidationIssueDto("validation-json-invalid", RenderValidationSeverity.Warning, "Stored validation data could not be read. Revalidate before retrying this render.")]);
+        }
+    }
 }
+
+
+
+
+
+
 

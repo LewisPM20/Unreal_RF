@@ -6,14 +6,14 @@ namespace RenderFarm.Controller.Api;
 
 public static class WorkerReadinessEvaluator
 {
-    public static WorkerProjectReadinessDto Evaluate(Worker worker, ProjectProfile project, RenderProfile? profile, string? requestedOutputDirectory = null)
+    public static WorkerProjectReadinessDto Evaluate(Worker worker, ProjectProfile project, RenderProfile? profile, string? requestedOutputDirectory = null, RenderDefaultsDto? defaults = null)
     {
         var reasons = new List<string>();
         var workerPath = project.WorkerPaths.FirstOrDefault(x => string.Equals(x.WorkerId, worker.Id, StringComparison.OrdinalIgnoreCase));
-        var projectPath = workerPath?.ProjectPath ?? project.UProjectPath;
+        var projectPath = FirstNonEmpty(workerPath?.ProjectPath, GetSetting(profile, "projectPath"), GetSetting(profile, "uprojectPath"), project.UProjectPath);
         var hasProjectPath = HasProjectPath(worker, project, workerPath, projectPath, reasons);
-        var (hasUnreal, unrealVersion) = HasCompatibleUnreal(worker, project, reasons);
-        var (canWriteOutput, hasEnoughDisk) = CanWriteOutput(worker, profile, requestedOutputDirectory, reasons);
+        var (hasUnreal, unrealVersion) = HasCompatibleUnreal(worker, project, profile, workerPath, defaults, reasons);
+        var (canWriteOutput, hasEnoughDisk) = CanWriteOutput(worker, profile, requestedOutputDirectory, defaults, reasons);
         var meetsProfileRequirements = MeetsProfileRequirements(worker, profile, reasons);
         var statusOk = worker.Status is WorkerStatus.Online or WorkerStatus.Idle;
         if (!statusOk)
@@ -59,8 +59,25 @@ public static class WorkerReadinessEvaluator
         return true;
     }
 
-    private static (bool HasUnreal, string? Version) HasCompatibleUnreal(Worker worker, ProjectProfile project, List<string> reasons)
+    private static (bool HasUnreal, string? Version) HasCompatibleUnreal(Worker worker, ProjectProfile project, RenderProfile? profile, WorkerProjectPath? workerPath, RenderDefaultsDto? defaults, List<string> reasons)
     {
+        if (!string.IsNullOrWhiteSpace(workerPath?.EnginePath))
+        {
+            return (true, project.PreferredEngineVersion ?? project.AllowedEngineVersions.FirstOrDefault());
+        }
+
+        var controllerManagedEngine = FirstNonEmpty(
+            GetSetting(profile, "unrealExecutablePath"),
+            GetSetting(profile, "unrealExe"),
+            GetSetting(profile, "unrealCommand"),
+            GetSetting(profile, "unrealSearchRoot"),
+            defaults?.UnrealExecutablePath,
+            defaults?.UnrealSearchRoot);
+        if (!string.IsNullOrWhiteSpace(controllerManagedEngine))
+        {
+            return (true, project.PreferredEngineVersion ?? project.AllowedEngineVersions.FirstOrDefault());
+        }
+
         var desiredVersions = new[] { project.PreferredEngineVersion }
             .Concat(project.AllowedEngineVersions)
             .Where(x => !string.IsNullOrWhiteSpace(x))
@@ -71,7 +88,7 @@ public static class WorkerReadinessEvaluator
         {
             if (installs.Length == 0)
             {
-                reasons.Add("Worker has not reported a usable Unreal installation.");
+                reasons.Add("No controller-managed Unreal path is set and the worker has not reported a usable Unreal installation.");
                 return (false, null);
             }
 
@@ -81,19 +98,20 @@ public static class WorkerReadinessEvaluator
         var match = installs.FirstOrDefault(install => desiredVersions.Contains(install.Version, StringComparer.OrdinalIgnoreCase));
         if (match is null)
         {
-            reasons.Add($"Worker lacks required Unreal version: {string.Join(", ", desiredVersions)}");
+            reasons.Add($"No controller-managed Unreal path is set and the worker lacks required Unreal version: {string.Join(", ", desiredVersions)}");
             return (false, null);
         }
 
         return (true, match.Version);
     }
 
-    private static (bool CanWrite, bool EnoughDisk) CanWriteOutput(Worker worker, RenderProfile? profile, string? requestedOutputDirectory, List<string> reasons)
+    private static (bool CanWrite, bool EnoughDisk) CanWriteOutput(Worker worker, RenderProfile? profile, string? requestedOutputDirectory, RenderDefaultsDto? defaults, List<string> reasons)
     {
         var outputRoot = FirstNonEmpty(
             requestedOutputDirectory,
             GetSetting(profile, "defaultOutputRoot"),
-            GetSetting(profile, "outputRoot"));
+            GetSetting(profile, "outputRoot"),
+            defaults?.SharedOutputRoot);
         var minFreeGb = TryGetDouble(GetSetting(profile, "minFreeGb"));
         if (string.IsNullOrWhiteSpace(outputRoot))
         {
@@ -105,8 +123,8 @@ public static class WorkerReadinessEvaluator
             root.Path.StartsWith(outputRoot, StringComparison.OrdinalIgnoreCase));
         if (reported is null)
         {
-            reasons.Add($"Worker has not reported output root: {outputRoot}");
-            return (false, false);
+            reasons.Add($"Output path will be validated by the worker when assigned: {outputRoot}");
+            return (true, true);
         }
 
         if (!reported.Exists || !reported.Writable)

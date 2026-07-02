@@ -31,4 +31,16 @@ public sealed class ApiTokenProtectionTests
     {
         Assert.True(ApiTokenProtection.IsAuthorized("Bearer secret", "secret"));
     }
+
+    [Fact]
+    public void ConfiguredSecretsAreOnlyDescribedAsRedacted()
+    {
+        const string secret = "super-secret-token";
+
+        var description = SecretRedaction.DescribeConfiguredSecret(secret);
+
+        Assert.Equal("configured (redacted)", description);
+        Assert.DoesNotContain(secret, description, StringComparison.Ordinal);
+        Assert.Equal("not configured", SecretRedaction.DescribeConfiguredSecret(null));
+    }
 }

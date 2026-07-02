@@ -420,14 +420,18 @@ function renderPendingWorkers() {
 }
 function renderOutputs() {
   const roots = [];
-  workers().forEach(worker => (worker.capabilities?.sharedOutputRoots || []).forEach(root => roots.push({ worker: worker.id, ...root })));
+  const defaults = state.renderDefaults || diagnostics()?.controllerConfiguration?.renderDefaults || {};
+  if (defaults.sharedOutputRoot) {
+    roots.push({ worker: 'Controller default', path: defaults.sharedOutputRoot, exists: true, writable: true, freeDiskGb: null, message: 'Workers validate this controller-supplied path when assigned a job.' });
+  }
+  workers().forEach(worker => (worker.capabilities?.sharedOutputRoots || []).forEach(root => roots.push({ worker: worker.name || worker.id, ...root })));
   byId('outputs').innerHTML = roots.length ? roots.map(root => `
     <article class="item">
       <div class="item-head"><div class="item-title">${escapeHtml(root.path)}</div>${badge(root.writable ? 'Writable' : 'Check')}</div>
-      <div class="meta">Worker ${escapeHtml(root.worker)} | exists ${escapeHtml(root.exists)} | writable ${escapeHtml(root.writable)} | ${escapeHtml(root.freeDiskGb) || '-'} GB free</div>
+      <div class="meta">${escapeHtml(root.worker)} | exists ${escapeHtml(root.exists)} | writable ${escapeHtml(root.writable)} | ${escapeHtml(root.freeDiskGb) || '-'} GB free</div>
       <div class="meta">${escapeHtml(root.message)}</div>
     </article>
-  `).join('') : empty('No shared output roots have been reported. Configure worker output roots and refresh telemetry.');
+  `).join('') : empty('No shared output default or worker output telemetry is available yet. Configure Controller Render Defaults in Settings.');
 }
 
 function renderProjects() {
@@ -435,8 +439,7 @@ function renderProjects() {
     <article class="item">
       <div class="item-head"><div class="item-title">${escapeHtml(project.displayName)}</div><span class="meta">${escapeHtml(project.id)}</span></div>
       <div class="meta">${escapeHtml(project.uProjectPath) || 'No default project path'} | UE ${escapeHtml(project.preferredEngineVersion) || 'any'}</div>
-      <div class="meta">Worker paths: ${(project.workerPaths || []).length}</div>
-      <div class="inline-actions"><button class="button primary" type="button" data-open-profile-project="${escapeHtml(project.id)}">Add profile</button><button class="button" type="button" data-readiness-project="${escapeHtml(project.id)}">Check readiness</button><button class="button danger" type="button" data-delete-project="${escapeHtml(project.id)}">Delete</button></div>
+      <div class="inline-actions"><button class="button danger" type="button" data-delete-project="${escapeHtml(project.id)}">Delete</button></div>
     </article>
   `).join('') : empty('No render profiles yet. Add your first Unreal project to start queueing renders.');
 }
@@ -448,7 +451,7 @@ function renderProfiles() {
       <article class="item">
         <div class="item-head"><div class="item-title">${escapeHtml(profile.displayName)}</div>${badge(profile.type)}</div>
         <div class="meta">Project ${escapeHtml(profile.projectId)} | Render asset ${escapeHtml(profile.assetPath) || 'template or manual launch'}</div>
-        <div class="meta">Map ${escapeHtml(settings.map || settings.level) || 'not set'} | Chunking ${profile.supportsChunking ? 'configured but gated' : 'off'}</div>
+        <div class="meta">Map ${escapeHtml(settings.map || settings.level) || 'not set'}</div>
         <div class="meta">Requirements: ${renderProfileRequirements(settings)}</div>
         <div class="inline-actions"><button class="button primary" type="button" data-queue-profile="${escapeHtml(profile.id)}">Queue render</button><button class="button danger" type="button" data-delete-profile="${escapeHtml(profile.id)}">Delete</button></div>
       </article>
@@ -456,6 +459,16 @@ function renderProfiles() {
   }).join('') : empty('No render setups are available yet. Use New Render to create a setup manually while queueing your first job.');
 }
 
+function renderJobValidationSummary(job) {
+  const validation = job?.validation;
+  if (!validation) return '<div class="validation-mini neutral"><strong>Not validated</strong><span>Open details to review setup.</span></div>';
+  const status = className(validation.status);
+  const top = (validation.issues || []).find(issue => className(issue.severity) === 'error') || (validation.issues || [])[0];
+  const label = status === 'blocked' ? 'Blocked' : status === 'needsattention' ? 'Review' : 'Ready';
+  const message = top?.message || validation.summary || 'Path format looks valid; asset existence requires deep validation.';
+  const action = status === 'blocked' ? `<button class="link-button" type="button" data-job-id="${escapeHtml(job.id)}">View fixes</button>` : '';
+  return `<div class="validation-mini ${escapeHtml(status)}"><strong>${escapeHtml(label)}</strong><span>${escapeHtml(message)}</span>${action}</div>`;
+}
 export function renderJobs() {
   const rows = jobs();
   renderQueueFilters(rows);
@@ -471,7 +484,7 @@ export function renderJobs() {
         <td>${escapeHtml(job.renderProfileId)}</td>
         <td>${escapeHtml(job.assignedWorkerId) || '-'}</td>
         <td>${escapeHtml(row.attemptCount)}</td>
-        <td>${escapeHtml(job.failureCategory || 'None')}<div class="meta">${escapeHtml(job.error || '')}</div></td>
+        <td>${escapeHtml(job.failureCategory || 'None')}<div class="meta">${escapeHtml(job.error || '')}</div>${renderJobValidationSummary(job)}</td>
         <td>${output ? `<button class="path-button" type="button" data-copy="${escapeHtml(output)}" data-copy-label="output path">${escapeHtml(output)}</button>` : '-'}</td>
         <td>${formatDate(job.updatedAtUtc)}</td>
       </tr>
@@ -566,19 +579,25 @@ function renderDiagnosticsPanel() {
   const counts = data.counts || {};
   const controller = data.controller || {};
   const database = data.database || {};
+  const configuration = data.controllerConfiguration || {};
+  const renderDefaults = configuration.renderDefaults || {};
   const outputs = data.sharedOutputRoots || [];
   const heartbeats = data.recentWorkerHeartbeats || [];
   const warnings = data.recentWarnings || [];
+  const recovery = data.startupRecovery || [];
   target.innerHTML = `
     <div class="diagnostics-grid">
       <article class="diagnostic-block"><span>Controller</span><strong>${escapeHtml(controller.service || 'RenderFarm Controller')}</strong><p>${escapeHtml(controller.version || '-')} | ${escapeHtml(controller.runtime || 'csharp')}</p><button class="button" type="button" data-copy="${escapeHtml(controller.url || window.location.origin)}" data-copy-label="controller URL">Copy URL</button></article>
       <article class="diagnostic-block"><span>Database</span><strong>${escapeHtml(database.usesDefaultPath ? 'Default path' : 'Configured path')}</strong><p>${escapeHtml(database.path || '-')}</p><button class="button" type="button" data-copy="${escapeHtml(database.path || '')}" data-copy-label="database path">Copy path</button></article>
+      <article class="diagnostic-block"><span>Render defaults</span><strong>${escapeHtml(renderDefaults.sharedOutputRoot ? 'Output configured' : 'Needs output root')}</strong><p>UE ${escapeHtml(renderDefaults.unrealExecutablePath || renderDefaults.unrealSearchRoot || 'not set')} | Output ${escapeHtml(renderDefaults.sharedOutputRoot || 'not set')}</p><button class="button" type="button" data-copy="${escapeHtml(JSON.stringify(renderDefaults, null, 2))}" data-copy-label="render defaults">Copy defaults</button></article>
       <article class="diagnostic-block"><span>Workers</span><strong>${escapeHtml(counts.readyWorkers ?? 0)} ready</strong><p>${escapeHtml(counts.workers ?? 0)} registered, ${escapeHtml(counts.pendingWorkers ?? 0)} pending approval</p></article>
       <article class="diagnostic-block"><span>Queue</span><strong>${escapeHtml(counts.activeJobs ?? 0)} active</strong><p>${escapeHtml(counts.queuedJobs ?? 0)} queued, ${escapeHtml(counts.failedJobs ?? 0)} failed, ${escapeHtml(counts.completedJobs ?? 0)} complete</p></article>
     </div>
     <div class="diagnostics-columns">
       <section><h3>Recent worker heartbeats</h3>${heartbeats.length ? heartbeats.map(item => `<div class="diagnostic-row"><strong>${escapeHtml(item.workerName || item.workerId)}</strong><span>${badge(item.status)} ${escapeHtml(item.secondsSinceHeartbeat)}s ago</span><small>${escapeHtml(item.hostname || '')} ${item.currentJobId ? `| job ${escapeHtml(item.currentJobId)}` : ''}</small></div>`).join('') : empty('No worker heartbeats have been recorded yet.')}</section>
       <section><h3>Shared output roots</h3>${outputs.length ? outputs.slice(0, 12).map(root => `<div class="diagnostic-row"><strong>${escapeHtml(root.path)}</strong><span>${badge(root.writable ? 'Writable' : 'Check')}</span><small>${escapeHtml(root.workerName || root.workerId)} | ${escapeHtml(root.freeDiskGb ?? '-')} GB free</small></div>`).join('') : empty('No shared output roots reported.')}</section>
+      <section><h3>Controller configuration</h3><div class="diagnostic-row"><strong>Source of truth</strong><span>${badge('Controller')}</span><small>${escapeHtml(configuration.sourceOfTruth || 'Controller owns render settings; workers execute assigned payloads.')}</small></div><div class="diagnostic-row"><strong>Output default</strong><span>${badge(renderDefaults.sharedOutputRoot ? 'Set' : 'Missing')}</span><small>${escapeHtml(renderDefaults.sharedOutputRoot || 'Configure in Settings')}</small></div><div class="diagnostic-row"><strong>Unreal default</strong><span>${badge((renderDefaults.unrealExecutablePath || renderDefaults.unrealSearchRoot) ? 'Set' : 'Missing')}</span><small>${escapeHtml(renderDefaults.unrealExecutablePath || renderDefaults.unrealSearchRoot || 'Configure in Settings')}</small></div></section>
+      <section><h3>Startup recovery</h3>${recovery.length ? recovery.map(item => `<div class="diagnostic-row"><strong>${escapeHtml(item.title)}</strong><span>${badge(item.severity)}</span><small>${escapeHtml(item.message)}</small></div>`).join('') : empty('No startup repair activity recorded for this controller session.')}</section>
       <section class="wide"><h3>Recent warnings</h3>${warnings.length ? warnings.map(item => `<div class="diagnostic-row"><strong>${escapeHtml(item.title)}</strong><span>${badge(item.severity)}</span><small>${escapeHtml(item.message)}</small></div>`).join('') : empty('No recent warnings or errors recorded.')}</section>
     </div>
   `;
@@ -626,11 +645,13 @@ export function renderSelects() {
 
 function renderDatalists() {
   const installs = workers().flatMap(worker => worker.capabilities?.unrealInstallations || []);
+  const configuration = diagnostics()?.controllerConfiguration || {};
+  const defaults = configuration.renderDefaults || state.renderDefaults || {};
   setOptions('workerIdList', workers().map(worker => worker.id));
-  setOptions('engineRootList', installs.map(install => install.rootPath));
+  setOptions('engineRootList', installs.map(install => install.rootPath).concat([defaults.unrealSearchRoot, defaults.unrealExecutablePath]));
   setOptions('engineVersionList', installs.map(install => install.version));
   setOptions('projectPathList', workers().flatMap(worker => (worker.capabilities?.projectPaths || []).map(path => path.path)));
-  setOptions('outputRootList', workers().flatMap(worker => (worker.capabilities?.sharedOutputRoots || []).map(root => root.path)));
+  setOptions('outputRootList', workers().flatMap(worker => (worker.capabilities?.sharedOutputRoots || []).map(root => root.path)).concat([defaults.sharedOutputRoot]));
 }
 
 function setOptions(id, values) {
@@ -650,6 +671,9 @@ function availableWorkers() {
 function empty(message) {
   return `<div class="empty">${escapeHtml(message)}</div>`;
 }
+
+
+
 
 
 

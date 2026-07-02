@@ -12,6 +12,7 @@ export const state = {
   activityNotificationsPrimed: false,
   activities: [],
   diagnostics: null,
+  renderDefaults: null,
   seenActivityIds: new Set()
 };
 
@@ -53,5 +54,10 @@ export function setDiagnostics(diagnostics) {
 export function diagnostics() {
   return state.diagnostics;
 }
+export function setRenderDefaults(defaults) {
+  state.renderDefaults = defaults || null;
+}
 
-
+export function renderDefaults() {
+  return state.renderDefaults;
+}
