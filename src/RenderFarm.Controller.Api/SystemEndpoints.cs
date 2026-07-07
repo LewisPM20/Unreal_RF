@@ -9,12 +9,14 @@ namespace RenderFarm.Controller.Api;
 public static class SystemEndpoints
 {
     private const string ServiceName = "RenderFarm.Controller.Api";
-    private const string ControllerVersion = "0.16.0-operator-polish";
+    private static string ControllerVersion => RenderFarmVersion.ProductVersion;
     private const string RuntimeName = "csharp";
 
     public static IEndpointRouteBuilder MapSystemEndpoints(this IEndpointRouteBuilder app)
     {
-        app.MapGet("/health", () => Results.Ok(new { ok = true, service = ServiceName, version = ControllerVersion, dashboard = "/" }));
+        app.MapGet("/health", () => Results.Ok(new { ok = true, service = ServiceName, version = ControllerVersion, protocolVersion = RenderFarmVersion.ProtocolVersion, apiContractVersion = RenderFarmVersion.ApiContractVersion, buildId = RenderFarmVersion.BuildId, dashboard = "/" }));
+
+        app.MapGet("/api/version", () => Results.Ok(new { service = ServiceName, runtime = RuntimeName, productVersion = RenderFarmVersion.ProductVersion, protocolVersion = RenderFarmVersion.ProtocolVersion, apiContractVersion = RenderFarmVersion.ApiContractVersion, minimumWorkerProductVersion = RenderFarmVersion.MinimumWorkerProductVersion, minimumWorkerProtocolVersion = RenderFarmVersion.MinimumWorkerProtocolVersion, minimumWorkerApiContractVersion = RenderFarmVersion.MinimumWorkerApiContractVersion, buildId = RenderFarmVersion.BuildId })).WithTags("System");
 
         var system = app.MapGroup("/api/system").WithTags("System");
         system.MapGet("", async (IWorkerRepository workers, IProjectRepository projects, IRenderProfileRepository profiles, IJobRepository jobs, HttpResponse response, CancellationToken ct) =>
@@ -110,7 +112,12 @@ public static class SystemEndpoints
                     dto.LastError,
                     dto.RegisteredAtUtc,
                     dto.LastHeartbeatUtc,
-                    Math.Max(0, (int)(now - dto.LastHeartbeatUtc).TotalSeconds));
+                    Math.Max(0, (int)(now - dto.LastHeartbeatUtc).TotalSeconds),
+                    dto.ProductVersion,
+                    dto.ProtocolVersion,
+                    dto.ApiContractVersion,
+                    dto.BuildId,
+                    dto.Compatibility);
             }
 
             var projectDtos = new ProjectProfileDto[projectList.Count];
@@ -241,7 +248,9 @@ public static class SystemEndpoints
                         approval = WorkerApproval.GetEffective(approvals, worker).ToString(),
                         lastHeartbeatUtc = worker.LastHeartbeatUtc,
                         secondsSinceHeartbeat = Math.Max(0, (int)(now - worker.LastHeartbeatUtc).TotalSeconds),
-                        currentJobId = worker.CurrentJobId
+                        currentJobId = worker.CurrentJobId,
+                        agentVersion = worker.AgentVersion,
+                        compatibility = RenderFarmVersion.EvaluateWorkerAgent(worker.AgentVersion)
                     })
                     .ToArray(),
                 recentWarnings = activity.ListRecent(50)
@@ -261,6 +270,152 @@ public static class SystemEndpoints
                     os = Environment.OSVersion.VersionString,
                     framework = System.Runtime.InteropServices.RuntimeInformation.FrameworkDescription
                 }
+            });
+        }).WithTags("System");
+        app.MapGet("/api/diagnostics/dispatch", async (
+            IWorkerRepository workers,
+            IProjectRepository projects,
+            IRenderProfileRepository profiles,
+            IJobRepository jobs,
+            IJobLeaseRepository leases,
+            ISettingsRepository settings,
+            IDispatchDiagnostics dispatch,
+            HttpResponse response,
+            CancellationToken ct) =>
+        {
+            DisableClientCaching(response);
+            var now = DateTimeOffset.UtcNow;
+            var workerListTask = workers.ListAsync(ct);
+            var projectListTask = projects.ListAsync(ct);
+            var profileListTask = profiles.ListAsync(ct);
+            var jobListTask = jobs.ListAsync(ct);
+            var activeLeasesTask = leases.ListActiveAsync(ct);
+            var staleLeasesTask = leases.ListExpiredAsync(now, ct);
+            var approvalsTask = WorkerApproval.ListAsync(settings, ct);
+            var schedulingModesTask = WorkerScheduling.ListAsync(settings, ct);
+            var defaultsTask = ControllerRenderDefaults.LoadAsync(settings, ct);
+
+            await Task.WhenAll(workerListTask, projectListTask, profileListTask, jobListTask, activeLeasesTask, staleLeasesTask, approvalsTask, schedulingModesTask, defaultsTask);
+
+            var workerList = await workerListTask;
+            var projectList = await projectListTask;
+            var profileList = await profileListTask;
+            var jobList = await jobListTask;
+            var activeLeases = await activeLeasesTask;
+            var staleLeases = await staleLeasesTask;
+            var approvals = await approvalsTask;
+            var schedulingModes = await schedulingModesTask;
+            var defaults = await defaultsTask;
+            var queuedJobs = jobList.Where(job => job.State == JobState.Queued).OrderByDescending(job => job.Priority).ThenBy(job => job.CreatedAtUtc).ToArray();
+
+            var eligibility = new List<object>();
+            foreach (var job in queuedJobs)
+            {
+                var project = projectList.FirstOrDefault(item => item.Id == job.ProjectId);
+                var profile = profileList.FirstOrDefault(item => item.Id == job.RenderProfileId);
+                foreach (var worker in workerList)
+                {
+                    var compatibility = RenderFarmVersion.EvaluateWorkerAgent(worker.AgentVersion);
+                    var approval = WorkerApproval.GetEffective(approvals, worker);
+                    var schedulingMode = WorkerScheduling.GetEffective(schedulingModes, worker);
+                    WorkerProjectReadinessDto? readiness = null;
+                    IReadOnlyList<string> reasons;
+                    if (project is null || profile is null || profile.ProjectId != project.Id)
+                    {
+                        reasons = ["Job references a missing project/profile or a profile from another project."];
+                    }
+                    else
+                    {
+                        readiness = WorkerReadinessEvaluator.Evaluate(worker, project, profile, job.OutputDirectory, defaults);
+                        reasons = readiness.Reasons;
+                    }
+
+                    eligibility.Add(new
+                    {
+                        jobId = job.Id,
+                        workerId = worker.Id,
+                        workerName = worker.Name,
+                        approval,
+                        schedulingMode,
+                        effectiveStatus = WorkerStatusProjection.GetEffectiveWorkerStatus(worker, now),
+                        agentVersion = worker.AgentVersion,
+                        compatibility,
+                        canRun = compatibility.Compatible
+                            && string.Equals(approval, WorkerApproval.Accepted, StringComparison.OrdinalIgnoreCase)
+                            && schedulingMode == WorkerSchedulingMode.Active
+                            && readiness?.CanRun == true,
+                        reasons
+                    });
+                }
+            }
+
+            var warnings = new List<string>();
+            if (workerList.Count == 0)
+            {
+                warnings.Add("No workers have registered with this controller.");
+            }
+
+            var incompatibleWorkers = workerList.Where(worker => !RenderFarmVersion.EvaluateWorkerAgent(worker.AgentVersion).Compatible).ToArray();
+            if (incompatibleWorkers.Length > 0)
+            {
+                warnings.Add($"{incompatibleWorkers.Length} worker(s) are running an incompatible RenderFarm version. Update or reinstall those workers before expecting dispatch.");
+            }
+
+            var pollingWorkers = dispatch.ListRecent(200).Select(item => item.WorkerId).Distinct(StringComparer.OrdinalIgnoreCase).Count();
+            if (workerList.Count > 0 && pollingWorkers == 0)
+            {
+                warnings.Add("Workers are registered, but no worker has polled the request-job endpoint since this controller started.");
+            }
+
+            return Results.Ok(new
+            {
+                generatedAtUtc = now,
+                controller = new
+                {
+                    service = ServiceName,
+                    productVersion = RenderFarmVersion.ProductVersion,
+                    protocolVersion = RenderFarmVersion.ProtocolVersion,
+                    apiContractVersion = RenderFarmVersion.ApiContractVersion,
+                    minimumWorkerProductVersion = RenderFarmVersion.MinimumWorkerProductVersion,
+                    minimumWorkerProtocolVersion = RenderFarmVersion.MinimumWorkerProtocolVersion,
+                    buildId = RenderFarmVersion.BuildId
+                },
+                queuedJobs = queuedJobs.Select(job => new
+                {
+                    job = job.ToDto(),
+                    latestDecision = dispatch.GetLatestForJob(job.Id),
+                    activeLease = activeLeases.FirstOrDefault(lease => lease.JobId == job.Id)?.ToDto()
+                }).ToArray(),
+                workers = workerList.Select(worker =>
+                {
+                    var dto = worker.ToDto();
+                    return new
+                    {
+                        dto.Id,
+                        dto.Name,
+                        dto.Hostname,
+                        dto.IpAddress,
+                        dto.Status,
+                        effectiveStatus = WorkerStatusProjection.GetEffectiveWorkerStatus(worker, now),
+                        approval = WorkerApproval.GetEffective(approvals, worker),
+                        schedulingMode = WorkerScheduling.GetEffective(schedulingModes, worker),
+                        dto.AgentVersion,
+                        dto.ProductVersion,
+                        dto.ProtocolVersion,
+                        dto.ApiContractVersion,
+                        dto.BuildId,
+                        dto.Compatibility,
+                        dto.CurrentJobId,
+                        dto.LastHeartbeatUtc,
+                        secondsSinceHeartbeat = Math.Max(0, (int)(now - worker.LastHeartbeatUtc).TotalSeconds),
+                        latestDecision = dispatch.GetLatestForWorker(worker.Id)
+                    };
+                }).ToArray(),
+                activeLeases = activeLeases.Select(lease => lease.ToDto()).ToArray(),
+                staleLeases = staleLeases.Select(lease => lease.ToDto()).ToArray(),
+                workerEligibilityResults = eligibility,
+                recentDecisions = dispatch.ListRecent(100),
+                configWarnings = warnings
             });
         }).WithTags("System");
         app.MapGet("/api/config", () => Results.Ok(new
@@ -382,5 +537,10 @@ public static class SystemEndpoints
         response.Headers.Pragma = "no-cache";
     }
 }
+
+
+
+
+
 
 

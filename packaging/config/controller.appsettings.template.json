@@ -10,9 +10,9 @@
       "RetryBackoffMultiplier": 1
     },
     "Discovery": {
-      "Enabled": false,
+      "Enabled": true,
       "Port": 39200,
-      "ControllerUrl": "http://CONTROLLER_IP:9200"
+      "ControllerUrl": ""
     },
     "Security": {
       "ApiToken": ""
@@ -32,4 +32,3 @@
     }
   }
 }
-

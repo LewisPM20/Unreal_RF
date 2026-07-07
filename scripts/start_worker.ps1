@@ -9,6 +9,13 @@ param(
     [int]$DiscoverySeconds = 5,
     [ValidateRange(1, 65535)]
     [int]$DiscoveryPort = 39200,
+    [ValidateRange(1, 65535)]
+    [int]$ControllerPort = 9200,
+    [switch]$LanScanEnabled,
+    [ValidateRange(1, 30)]
+    [int]$LanScanTimeoutSeconds = 4,
+    [ValidateRange(1, 4096)]
+    [int]$LanScanMaxHosts = 254,
     [string]$ServiceUrl = "http://127.0.0.1:9100",
     [ValidateRange(1, 3600)]
     [int]$HeartbeatSeconds = 5,
@@ -31,6 +38,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+if (-not $PSBoundParameters.ContainsKey("LanScanEnabled")) { $LanScanEnabled = $true }
 
 function Assert-DotNetCli {
     if (-not (Get-Command dotnet -ErrorAction SilentlyContinue)) {
@@ -77,6 +85,10 @@ Set-OptionalEnvironmentValue -Name "Logging__LogLevel__Default" -Value $LogLevel
 $env:RenderFarm__DiscoveryEnabled = [string][bool]$DiscoveryEnabled
 $env:RenderFarm__DiscoverySeconds = [string]$DiscoverySeconds
 $env:RenderFarm__DiscoveryPort = [string]$DiscoveryPort
+$env:RenderFarm__ControllerPort = [string]$ControllerPort
+$env:RenderFarm__LanScanEnabled = [string][bool]$LanScanEnabled
+$env:RenderFarm__LanScanTimeoutSeconds = [string]$LanScanTimeoutSeconds
+$env:RenderFarm__LanScanMaxHosts = [string]$LanScanMaxHosts
 $env:RenderFarm__ServiceUrl = $ServiceUrl
 $env:RenderFarm__HeartbeatSeconds = [string]$HeartbeatSeconds
 $env:RenderFarm__JobPollingSeconds = [string]$JobPollingSeconds
@@ -86,13 +98,16 @@ Set-IndexedEnvironmentValues -Prefix "RenderFarm__ProjectPaths__" -Values $Proje
 Set-IndexedEnvironmentValues -Prefix "RenderFarm__SharedOutputRoots__" -Values $SharedOutputRoots
 Set-IndexedEnvironmentValues -Prefix "RenderFarm__UnrealSearchRoots__" -Values $UnrealSearchRoots
 
-$controllerLabel = if ($ControllerUrl) { $ControllerUrl } elseif ($DiscoveryEnabled) { "LAN discovery, then localhost fallback" } else { "localhost fallback http://127.0.0.1:9200" }
+$controllerLabel = if ($ControllerUrl) { $ControllerUrl } elseif ($DiscoveryEnabled -and $LanScanEnabled) { "LAN discovery, LAN scan, then localhost fallback" } elseif ($DiscoveryEnabled) { "LAN discovery, then localhost fallback" } elseif ($LanScanEnabled) { "LAN scan, then localhost fallback" } else { "localhost fallback http://127.0.0.1:9200" }
 Write-Host "Starting RenderFarm worker"
 if ($ProjectPaths.Count -gt 0 -or $SharedOutputRoots.Count -gt 0 -or $UnrealSearchRoots.Count -gt 0) {
     Write-Host "Legacy worker-side render path options were supplied. New production jobs receive Unreal, project, and output settings from the controller assignment payload." -ForegroundColor Yellow
 }
 Write-Host "  Controller: $controllerLabel"
 Write-Host "  Service URL: $ServiceUrl"
+Write-Host "  Discovery UDP: $DiscoveryPort"
+Write-Host "  Controller TCP port for LAN scan: $ControllerPort"
+Write-Host "  LAN scan: $([bool]$LanScanEnabled) max $LanScanMaxHosts host(s), $LanScanTimeoutSeconds second timeout"
 Write-Host "  Project: $Project"
 Write-Host "  Configuration: $Configuration"
 Write-Host "  Log level: $LogLevel"
@@ -106,3 +121,5 @@ if ($RenderTimeoutSeconds -gt 0) { Write-Host "  Render timeout: $RenderTimeoutS
 
 & dotnet run --project $Project --configuration $Configuration
 exit $LASTEXITCODE
+
+

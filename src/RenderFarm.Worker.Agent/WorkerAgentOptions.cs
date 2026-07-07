@@ -11,6 +11,11 @@ public sealed class WorkerAgentOptions
     public bool DiscoveryEnabled { get; set; } = false;
     public int DiscoverySeconds { get; set; } = 5;
     public int DiscoveryPort { get; set; } = 39200;
+    public int ControllerPort { get; set; } = 9200;
+    public bool LanScanEnabled { get; set; } = true;
+    public int LanScanTimeoutSeconds { get; set; } = 4;
+    public int LanScanMaxHosts { get; set; } = 254;
+    public string? LastKnownControllerPath { get; set; }
     public string ControllerUrl { get; set; } = string.Empty;
     public string? ApiToken { get; set; }
     public string ServiceUrl { get; set; } = "http://127.0.0.1:9100";
@@ -23,4 +28,7 @@ public sealed class WorkerAgentOptions
     public string[] UnrealSearchRoots { get; set; } = [];
     public string? AttemptLogRoot { get; set; }
     public string? WorkerStateFilePath { get; set; }
+    public bool AllowDuplicateWorkerInstance { get; set; } = false;
 }
+
+

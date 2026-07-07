@@ -14,6 +14,7 @@ builder.Services.Configure<ControllerSecurityOptions>(builder.Configuration.GetS
 builder.Services.Configure<NotificationOptions>(builder.Configuration.GetSection("RenderFarm:Notifications"));
 builder.Services.AddHttpClient();
 builder.Services.AddSingleton<IActivityLog, InMemoryActivityLog>();
+builder.Services.AddSingleton<IDispatchDiagnostics, InMemoryDispatchDiagnostics>();
 builder.Services.AddSingleton<SqliteRenderFarmRepository>();
 builder.Services.AddSingleton<IRenderFarmDatabase>(sp => sp.GetRequiredService<SqliteRenderFarmRepository>());
 builder.Services.AddSingleton<IWorkerRepository>(sp => sp.GetRequiredService<SqliteRenderFarmRepository>());
@@ -78,6 +79,8 @@ app.MapJobEndpoints();
 app.MapSettingsEndpoints();
 
 app.Run();
+
+
 
 
 

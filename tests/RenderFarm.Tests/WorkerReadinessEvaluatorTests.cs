@@ -116,7 +116,7 @@ public sealed class WorkerReadinessEvaluatorTests
             WorkerStatus.Idle,
             null,
             null,
-            "test",
+            RenderFarmVersion.FormatWorkerAgentVersion(RenderFarmVersion.ProductVersion, RenderFarmVersion.ProtocolVersion, RenderFarmVersion.ApiContractVersion, RenderFarmVersion.BuildId),
             new WorkerCapabilities(
                 cpuCores,
                 ramGb,
@@ -153,3 +153,4 @@ public sealed class WorkerReadinessEvaluatorTests
     private static RenderProfile CreateProfile(IReadOnlyDictionary<string, string>? settings = null) =>
         new("profile-1", "project-1", "Profile", RenderProfileType.MrqQueue, "/Game/MRQ", null, "png", false, settings ?? new Dictionary<string, string>());
 }
+

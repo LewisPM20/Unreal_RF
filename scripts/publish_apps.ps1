@@ -344,7 +344,7 @@ Install for the current user:
 Worker example:
 
 ~~~powershell
-.\installer\install_renderfarm.ps1 -Role worker -ControllerUrl http://CONTROLLER_IP:9200 -WorkerId worker-pc-01 -CreateShortcuts
+.\installer\install_renderfarm.ps1 -Role worker -ControllerUrl http://<controller-lan-ip>:9200 -WorkerId worker-pc-01 -CreateShortcuts
 ~~~
 
 Uninstall the package from Windows Apps, or use the packaged script for a manual cleanup:
@@ -379,6 +379,7 @@ Write-Host "Published launcher to $LauncherOut"
 Write-Host "Created distributable package at $PackageRoot ($(Format-ByteSize (Get-DirectorySize $PackageRoot)))"
 if ($selfContainedValue -eq "false") { Write-Host "Framework-dependent build: target PCs need the .NET 8 Desktop Runtime." }
 $global:LASTEXITCODE = 0
+
 
 
 

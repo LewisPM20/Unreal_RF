@@ -16,6 +16,7 @@ let refreshInFlight = false;
 let activeJobDetailsRequest = 0;
 let newRenderStep = 1;
 let pendingConfirmation = null;
+document.body.dataset.view = state.currentView;
 
 function setJobDrawerOpen(isOpen) {
   const drawer = byId('jobDrawer');
@@ -150,6 +151,7 @@ function notifySnapshotChanges(snapshot, previousJobs, previousApprovals, suppre
 
 function switchView(view) {
   state.currentView = view;
+  document.body.dataset.view = view;
   document.querySelectorAll('.nav-tab').forEach(tab => tab.classList.toggle('active', tab.dataset.view === view));
   document.querySelectorAll('.view').forEach(panel => panel.classList.toggle('active', panel.dataset.panel === view));
 }
@@ -564,6 +566,28 @@ function resolveConfirmation(result) {
     resolve(result);
   }
 }
+function openProjectModal(projectId = '') {
+  const form = byId('projectForm');
+  form.reset();
+  const project = projects().find(item => item.id === projectId);
+  byId('projectModalTitle').textContent = project ? 'Edit project' : 'Add project';
+  if (project) {
+    form.elements.id.value = project.id || '';
+    form.elements.displayName.value = project.displayName || '';
+    form.elements.uProjectPath.value = project.uProjectPath || '';
+    form.elements.preferredEngineVersion.value = project.preferredEngineVersion || '';
+    form.elements.allowedEngineVersions.value = (project.allowedEngineVersions || []).join(', ');
+    const mapping = (project.workerPaths || project.workerProjectPaths || [])[0];
+    if (mapping) {
+      form.elements.workerId.value = mapping.workerId || '';
+      form.elements.enginePath.value = mapping.enginePath || '';
+      form.elements.workerProjectPath.value = mapping.projectPath || '';
+      form.elements.logDirectory.value = mapping.logDirectory || '';
+    }
+  }
+  openModal('projectModal');
+}
+
 function closeModal(id) {
   const modal = byId(id);
   if (!modal) return;
@@ -574,16 +598,79 @@ function closeModal(id) {
 }
 
 function openProfileModal(projectId = '') {
-  renderSelects();
   const form = byId('profileForm');
+  form.reset();
+  byId('profileModalTitle').textContent = 'Add render profile';
+  renderSelects();
   if (projectId) {
     form.elements.projectId.value = projectId;
-    form.elements.id.value ||= `${projectId}-profile`;
-    form.elements.displayName.value ||= `${projects().find(project => project.id === projectId)?.displayName || projectId} render profile`;
+    form.elements.id.value = nextProfileId(`${projectId}-profile`);
+    form.elements.displayName.value = `${projects().find(project => project.id === projectId)?.displayName || projectId} render profile`;
   }
   openModal('profileModal');
 }
 
+function openProfileEditor(profileId = '') {
+  const form = byId('profileForm');
+  const profile = profiles().find(item => item.id === profileId);
+  if (!profile) {
+    toast('Render profile was not found. Refresh the farm and try again.', 'warning');
+    return;
+  }
+
+  form.reset();
+  renderSelects();
+  const settings = profile.settings || {};
+  byId('profileModalTitle').textContent = 'Edit render profile';
+  form.elements.id.value = profile.id || '';
+  form.elements.projectId.value = profile.projectId || '';
+  form.elements.displayName.value = profile.displayName || '';
+  form.elements.type.value = profile.type || 'MrqQueue';
+  form.elements.mrqMode.value = settings.mrqMode || 'Queue';
+  form.elements.mapName.value = settings.map || settings.mapName || settings.level || '';
+  form.elements.levelSequence.value = settings.sequence || settings.levelSequence || '';
+  form.elements.assetPath.value = profile.assetPath || '';
+  form.elements.extraArgs.value = settings.extraArgs || '';
+  form.elements.minCpuCores.value = settings.minCpuCores || '';
+  form.elements.minRamGb.value = settings.minRamGb || '';
+  form.elements.minVramGb.value = settings.minVramGb || '';
+  form.elements.gpuNameContains.value = settings.gpuNameContains || '';
+  form.elements.unrealExecutablePath.value = settings.unrealExecutablePath || '';
+  form.elements.unrealSearchRoot.value = settings.unrealSearchRoot || '';
+  form.elements.defaultOutputRoot.value = settings.defaultOutputRoot || '';
+  form.elements.outputSubfolderPattern.value = settings.outputSubfolderPattern || '';
+  form.elements.timeoutSeconds.value = settings.timeoutSeconds || '';
+  form.elements.commandTemplate.value = profile.commandTemplate || '';
+  openModal('profileModal');
+}
+
+function nextProfileId(base) {
+  const clean = slug(base || 'render-profile');
+  const existing = new Set(profiles().map(profile => String(profile.id || '').toLowerCase()));
+  if (!existing.has(clean.toLowerCase())) return clean;
+  for (let index = 2; index < 1000; index += 1) {
+    const candidate = `${clean}-${index}`;
+    if (!existing.has(candidate.toLowerCase())) return candidate;
+  }
+  return `${clean}-${Date.now()}`;
+}
+
+async function duplicateProfile(profileId) {
+  const profile = profiles().find(item => item.id === profileId);
+  if (!profile) {
+    toast('Render profile was not found. Refresh the farm and try again.', 'warning');
+    return;
+  }
+
+  const copy = JSON.parse(JSON.stringify(profile));
+  copy.id = nextProfileId(`${profile.id}-copy`);
+  copy.displayName = `${profile.displayName || profile.id} copy`;
+  await sendJson('/api/render-profiles', 'POST', copy);
+  state.selectedProjectId = copy.projectId;
+  state.selectedProjectTab = 'profiles';
+  toast('Render profile duplicated', 'success');
+  await refresh();
+}
 function openJobModalForProfile(profileId = '') {
   renderSelects();
   const form = byId('jobForm');
@@ -759,10 +846,11 @@ function collectOutputRoots() {
 function collectWizardReadiness() {
   const roots = collectOutputRoots();
   const approvedWorkers = workers().filter(worker => className(worker.approval || 'accepted') === 'accepted');
+  const incompatibleWorkers = approvedWorkers.filter(worker => worker.compatibility?.compatible === false);
   const onlineWorkers = approvedWorkers.filter(worker => {
     const status = className(worker.effectiveStatus || worker.status);
     const mode = className(worker.schedulingMode || 'active');
-    return (status === 'online' || status === 'idle') && mode === 'active';
+    return worker.compatibility?.compatible !== false && (status === 'online' || status === 'idle') && mode === 'active';
   });
   const busyWorkers = approvedWorkers.filter(worker => className(worker.effectiveStatus || worker.status) === 'busy');
   const writableRoots = roots.filter(root => root.approved && root.writable);
@@ -770,6 +858,7 @@ function collectWizardReadiness() {
 
   if (!workers().length) warnings.push('No workers connected yet. Start a worker machine to make it appear here.');
   if (!approvedWorkers.length) warnings.push('No approved workers are available for scheduling.');
+  if (incompatibleWorkers.length) warnings.push(`${incompatibleWorkers.length} approved worker(s) need an update before they can receive jobs.`);
   if (!onlineWorkers.length) warnings.push(busyWorkers.length ? 'Workers are connected, but all approved workers are currently busy.' : 'No approved worker is currently idle or online.');
   if (!writableRoots.length) warnings.push('Configure a controller output default or start a worker and confirm its output root.');
   if (!wizardForm().elements.outputDirectory.value.trim()) warnings.push('No output location has been selected. The controller will apply the saved render default when available.');
@@ -1168,8 +1257,9 @@ function renderRawLogSection(classification, attempts, failureText) {
 }
 
 function renderJobDrawer(job, attempts = [], events = []) {
-  const artifact = latestArtifactSummary(events);
-  const outputPath = job.outputDirectory || artifact?.outputDirectory || '';
+  const outputValidation = latestOutputValidation(events);
+  const artifact = latestArtifactSummary(events) || outputValidation?.artifactSummary || null;
+  const outputPath = job.outputDirectory || artifact?.outputDirectory || outputValidation?.outputDirectory || '';
   const failureText = buildFailureDetails(job, attempts, events);
   byId('jobDrawerTitle').textContent = job.name || job.id;
   byId('jobDrawerMeta').textContent = `${job.id} | ${job.projectId} | ${job.renderProfileId}`;
@@ -1219,7 +1309,7 @@ function renderJobDrawer(job, attempts = [], events = []) {
   renderJobWarningsSection(job, logClassification);
   renderLogDiagnosticsSection(logClassification);
   renderRawLogSection(logClassification, attempts, failureText);
-  renderArtifactSummary(artifact, outputPath);
+  renderArtifactSummary(artifact, outputPath, outputValidation);
 }
 
 function renderJobDrawerActions(job, outputPath, failureText) {
@@ -1273,6 +1363,10 @@ function latestArtifactSummary(events) {
   return events.map(event => parseArtifactSummary(event.dataJson)).filter(Boolean).at(-1) || null;
 }
 
+function latestOutputValidation(events) {
+  return events.map(event => parseOutputValidation(event.dataJson)).filter(Boolean).at(-1) || null;
+}
+
 function formatDuration(start, end) {
   if (!start || !end) return '-';
   const ms = Math.max(0, new Date(end).getTime() - new Date(start).getTime());
@@ -1284,19 +1378,29 @@ function formatDuration(start, end) {
   return `${hours}h ${minutes % 60}m`;
 }
 
-function renderArtifactSummary(artifact, outputPath = '') {
-  if (!artifact && !outputPath) {
+function renderArtifactSummary(artifact, outputPath = '', outputValidation = null) {
+  if (!artifact && !outputPath && !outputValidation) {
     byId('jobDrawerArtifacts').innerHTML = '<div class="empty">No artifact summary has been recorded yet. Completed renders should report an output directory and file count after validation.</div>';
     return;
   }
 
-  const files = (artifact?.sampleFiles || []).map(file => `<li>${escapeHtml(file)}</li>`).join('');
-  const detected = (artifact?.detectedExtensions || []).map(ext => `.${ext}`).join(', ');
+  const sampleFiles = artifact?.sampleFiles || outputValidation?.sampleFiles || [];
+  const extensions = artifact?.detectedExtensions || outputValidation?.detectedExtensions || [];
+  const files = sampleFiles.map(file => `<li>${escapeHtml(file)}</li>`).join('');
+  const detected = extensions.map(ext => ext.startsWith('.') ? ext : `.${ext}`).join(', ');
+  const validationBlock = outputValidation ? `
+    <div class="validation-card ${className(outputValidation.status)}">
+      <span>Output validation</span>
+      <strong>${escapeHtml(outputValidation.status)} | ${escapeHtml(outputValidation.mode)}</strong>
+      <p>${escapeHtml(outputValidation.message || '')}</p>
+      ${outputValidation.suggestedFix ? `<p><b>Fix:</b> ${escapeHtml(outputValidation.suggestedFix)}</p>` : ''}
+    </div>` : '';
   byId('jobDrawerArtifacts').innerHTML = `
     <article class="item artifact-card">
-      <div class="item-head"><div class="item-title">${escapeHtml(outputPath || artifact.outputDirectory)}</div>${artifact ? badge('Verified') : badge('Output path')}</div>
-      <div class="meta">${artifact ? `${escapeHtml(artifact.fileCount)} file(s), ${formatBytes(artifact.totalBytes)}${detected ? ` | ${escapeHtml(detected)}` : ``}` : 'Output path recorded; artifact scan has not reported file counts yet.'}</div>
+      <div class="item-head"><div class="item-title">${escapeHtml(outputPath || artifact?.outputDirectory || outputValidation?.outputDirectory || 'Output')}</div>${artifact || outputValidation ? badge('Verified') : badge('Output path')}</div>
+      <div class="meta">${artifact ? `${escapeHtml(artifact.fileCount)} file(s), ${formatBytes(artifact.totalBytes)}${detected ? ` | ${escapeHtml(detected)}` : ``}` : outputValidation ? `${escapeHtml(outputValidation.fileCount || 0)} file(s), ${formatBytes(outputValidation.totalBytes || 0)}${detected ? ` | ${escapeHtml(detected)}` : ``}` : 'Output path recorded; artifact scan has not reported file counts yet.'}</div>
       ${outputPath ? `<button class="button" type="button" data-copy="${escapeHtml(outputPath)}" data-copy-label="output path">Copy output path</button>` : ''}
+      ${validationBlock}
       ${files ? `<ul class="artifact-list">${files}</ul>` : ''}
     </article>
   `;
@@ -1306,7 +1410,20 @@ function parseArtifactSummary(dataJson) {
   if (!dataJson) return null;
   try {
     const parsed = JSON.parse(dataJson);
-    return parsed && typeof parsed === 'object' && 'outputDirectory' in parsed && 'fileCount' in parsed ? parsed : null;
+    if (parsed && typeof parsed === 'object' && 'outputDirectory' in parsed && 'fileCount' in parsed) return parsed;
+    if (parsed?.artifactSummary) return parsed.artifactSummary;
+    if (parsed?.outputValidation?.artifactSummary) return parsed.outputValidation.artifactSummary;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function parseOutputValidation(dataJson) {
+  if (!dataJson) return null;
+  try {
+    const parsed = JSON.parse(dataJson);
+    return parsed?.outputValidation || null;
   } catch {
     return null;
   }
@@ -1429,7 +1546,9 @@ async function handleDocumentClick(event) {
   const modalOpen = event.target?.closest?.('[data-modal-target]');
   if (modalOpen) {
     event.preventDefault();
-    openModal(modalOpen.dataset.modalTarget);
+    if (modalOpen.dataset.modalTarget === 'projectModal') openProjectModal();
+    else if (modalOpen.dataset.modalTarget === 'profileModal') openProfileModal();
+    else openModal(modalOpen.dataset.modalTarget);
     return;
   }
 
@@ -1514,13 +1633,41 @@ async function handleDocumentClick(event) {
     return;
   }
 
-  const actionTarget = event.target?.closest?.('[data-view], [data-fill-project-worker], [data-worker-mode], [data-accept-worker], [data-reject-worker], [data-delete-project], [data-delete-profile], [data-open-profile-project], [data-queue-profile]');
+  const actionTarget = event.target?.closest?.('[data-view], [data-select-project], [data-project-tab], [data-edit-project], [data-edit-profile], [data-duplicate-profile], [data-fill-project-worker], [data-worker-mode], [data-accept-worker], [data-reject-worker], [data-delete-project], [data-delete-profile], [data-open-profile-project], [data-queue-profile]');
   const data = actionTarget?.dataset;
   if (!data) return;
 
   try {
     if (data.view) {
       switchView(data.view);
+      return;
+    }
+
+    if (data.selectProject) {
+      state.selectedProjectId = data.selectProject;
+      state.selectedProjectTab ||= 'profiles';
+      renderAll();
+      return;
+    }
+
+    if (data.projectTab) {
+      state.selectedProjectTab = data.projectTab;
+      renderAll();
+      return;
+    }
+
+    if (data.editProject) {
+      openProjectModal(data.editProject);
+      return;
+    }
+
+    if (data.editProfile) {
+      openProfileEditor(data.editProfile);
+      return;
+    }
+
+    if (data.duplicateProfile) {
+      await duplicateProfile(data.duplicateProfile);
       return;
     }
 
@@ -1565,8 +1712,28 @@ async function handleDocumentClick(event) {
   }
 }
 
+function handleProjectWorkbenchInput(event) {
+  if (event.target?.id !== 'projectProfileSearch') return;
+  state.projectProfileSearch = event.target.value;
+  renderAll();
+  byId('projectProfileSearch')?.focus();
+}
+
+function handleProjectWorkbenchChange(event) {
+  if (event.target?.id === 'projectProfileType') {
+    state.projectProfileType = event.target.value;
+    renderAll();
+  }
+  if (event.target?.id === 'projectProfileSort') {
+    state.projectProfileSort = event.target.value || 'name';
+    renderAll();
+  }
+}
+
 function bindEvents() {
   document.addEventListener('click', handleDocumentClick);
+  document.addEventListener('input', handleProjectWorkbenchInput);
+  document.addEventListener('change', handleProjectWorkbenchChange);
   byId('closeJobDrawer').addEventListener('click', closeJobDrawer);
   byId('jobDrawerBackdrop').addEventListener('click', closeJobDrawer);
   document.addEventListener('keydown', event => {
@@ -1678,7 +1845,9 @@ function bindEvents() {
       workerPaths
     });
 
-    toast('Project registered', 'success');
+    state.selectedProjectId = projectId;
+    state.selectedProjectTab = 'overview';
+    toast('Project saved', 'success');
     form.reset();
     closeModal('projectModal');
     switchView('projects');
@@ -1716,7 +1885,9 @@ function bindEvents() {
       settings
     });
 
-    toast('Render profile created', 'success');
+    state.selectedProjectId = data.projectId;
+    state.selectedProjectTab = 'profiles';
+    toast('Render profile saved', 'success');
     form.reset();
     closeModal('profileModal');
     switchView('projects');
@@ -1759,6 +1930,10 @@ state.refreshTimer = window.setInterval(() => refresh({ quiet: true }), refreshI
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden) void refresh({ quiet: true });
 });
+
+
+
+
 
 
 

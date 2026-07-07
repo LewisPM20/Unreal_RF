@@ -36,7 +36,8 @@ public sealed class LaunchScriptAssetTests
         Assert.Contains("RenderFarm__Security__ApiToken", controllerText);
         Assert.Contains("RenderFarm__ApiToken", workerText);
         Assert.Contains("app-role.json", roleText);
-        Assert.Contains("& $script -HostName $HostName -Port $Port", roleText);
+        Assert.Contains("$controllerArgs = @('-HostName', $HostName", roleText);
+        Assert.Contains("& $script @controllerArgs", roleText);
         Assert.Contains("controller", roleText);
         Assert.Contains("worker", roleText);
     }
@@ -113,6 +114,8 @@ public sealed class LaunchScriptAssetTests
         Assert.Contains("RenderFarm__ProjectPaths__0", serviceText);
         Assert.Contains("RenderFarm__SharedOutputRoots__0", serviceText);
         Assert.Contains("RenderFarm__UnrealSearchRoots__0", serviceText);
+        Assert.Contains("RenderFarm__DiscoveryPort", serviceText);
+        Assert.Contains("RenderFarm__LanScanEnabled", serviceText);
         Assert.Contains("ISCC.exe", installerText);
         Assert.Contains("RenderFarm.iss", installerText);
         Assert.Contains("windowsdesktop-runtime-8.", installerText);
@@ -123,6 +126,9 @@ public sealed class LaunchScriptAssetTests
         Assert.Contains("desktopicon", setupText);
         Assert.Contains("-Accept", firewallText);
         Assert.Contains("New-NetFirewallRule", firewallText);
+        Assert.Contains("RenderFarm Controller HTTP", firewallText);
+        Assert.Contains("RenderFarm Controller Discovery UDP", firewallText);
+        Assert.Contains("RenderFarm Worker Discovery UDP", firewallText);
         Assert.Contains("signtool.exe", signingText);
         Assert.Contains("CertificateThumbprint", signingText);
     }
@@ -166,3 +172,5 @@ public sealed class LaunchScriptAssetTests
         throw new InvalidOperationException("Could not find repository root containing RenderFarm.sln.");
     }
 }
+
+

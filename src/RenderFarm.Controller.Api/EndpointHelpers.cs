@@ -52,7 +52,7 @@ internal static class WorkerStatusProjection
             return worker.Status.ToString();
         }
 
-        if (worker.Status is WorkerStatus.Offline or WorkerStatus.Disabled or WorkerStatus.Error)
+        if (worker.Status is WorkerStatus.Offline or WorkerStatus.Disabled or WorkerStatus.Error or WorkerStatus.IncompatibleVersion)
         {
             return worker.Status.ToString();
         }
@@ -187,3 +187,4 @@ internal static class WorkerScheduling
 }
 
 public sealed record QueueSettingsRequest(bool Enabled);
+

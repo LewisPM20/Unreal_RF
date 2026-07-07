@@ -6,6 +6,8 @@ namespace RenderFarm.Launcher;
 
 public partial class App : Application
 {
+    private IDisposable? singleInstanceGuard;
+
     public App()
     {
         DispatcherUnhandledException += OnDispatcherUnhandledException;
@@ -17,6 +19,14 @@ public partial class App : Application
         if (e.Args.Length > 0)
         {
             Shutdown(RenderFarmLauncher.Run(e.Args));
+            return;
+        }
+
+        singleInstanceGuard = LauncherSingleInstanceGuard.TryAcquire(out var launcherGuardError);
+        if (singleInstanceGuard is null)
+        {
+            MessageBox.Show(launcherGuardError, "RenderFarm Launcher", MessageBoxButton.OK, MessageBoxImage.Information);
+            Shutdown(2);
             return;
         }
 
@@ -35,6 +45,13 @@ public partial class App : Application
             ShowFatalError(ex);
             Shutdown(1);
         }
+    }
+
+    protected override void OnExit(ExitEventArgs e)
+    {
+        singleInstanceGuard?.Dispose();
+        singleInstanceGuard = null;
+        base.OnExit(e);
     }
 
     private static void OnDispatcherUnhandledException(object sender, DispatcherUnhandledExceptionEventArgs e)

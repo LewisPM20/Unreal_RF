@@ -104,7 +104,7 @@ public sealed class JobSchedulerTests
             WorkerStatus.Idle,
             null,
             null,
-            "test",
+            RenderFarmVersion.FormatWorkerAgentVersion(RenderFarmVersion.ProductVersion, RenderFarmVersion.ProtocolVersion, RenderFarmVersion.ApiContractVersion, RenderFarmVersion.BuildId),
             new WorkerCapabilities(
                 16,
                 64,
@@ -143,6 +143,25 @@ public sealed class JobSchedulerTests
         Assert.Empty(await harness.Leases.ListActiveAsync(CancellationToken.None));
     }
 
+    [Fact]
+    public async Task OldVersionWorkerCannotReserveJob()
+    {
+        var harness = await SchedulerHarness.CreateAsync();
+        await harness.SeedSchedulableWorkerAsync();
+        var worker = await harness.Workers.GetAsync("worker-1", CancellationToken.None);
+        Assert.NotNull(worker);
+        await harness.Workers.UpsertAsync(worker! with { AgentVersion = "0.12.0-csharp-takeover" }, CancellationToken.None);
+        await harness.Scheduler.CreateJobAsync(new CreateRenderJobRequest("project-1", "profile-1", "Render Main"), CancellationToken.None);
+
+        var assignment = await harness.Scheduler.RequestJobAsync("worker-1", CancellationToken.None);
+        var jobs = await harness.Jobs.ListAsync(CancellationToken.None);
+
+        Assert.False(assignment.Assigned);
+        Assert.Contains("requires", assignment.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Empty(await harness.Leases.ListActiveAsync(CancellationToken.None));
+        Assert.Single(jobs);
+        Assert.Equal(JobState.Queued, jobs[0].State);
+    }
     [Fact]
     public async Task DrainingWorkerCannotReserveNewJob()
     {
@@ -583,7 +602,7 @@ public sealed class JobSchedulerTests
             await repository.InitializeAsync(CancellationToken.None);
             var schedulerOptions = Options.Create(new JobSchedulerOptions { LeaseSeconds = 30, MaxAttempts = maxAttempts, RetryDelaySeconds = retryDelaySeconds });
             var retryPolicy = new ConfiguredRetryPolicy(schedulerOptions);
-            var scheduler = new JobScheduler(repository, repository, repository, repository, repository, repository, repository, repository, repository, retryPolicy, schedulerOptions, notificationSink);
+            var scheduler = new JobScheduler(repository, repository, repository, repository, repository, repository, repository, repository, repository, retryPolicy, schedulerOptions, null, notificationSink);
             return new SchedulerHarness(repository, scheduler);
         }
 
@@ -607,7 +626,7 @@ public sealed class JobSchedulerTests
                 [new UnrealEngineInstallation("5.7", "C:\\Program Files\\Epic Games\\UE_5.7", "C:\\Program Files\\Epic Games\\UE_5.7\\Engine\\Binaries\\Win64\\UnrealEditor-Cmd.exe", true)],
                 [new ProjectPathStatus("D:\\Projects\\Demo\\Demo.uproject", true)],
                 [new SharedOutputStatus("\\\\server\\renders", true, true, 100)]);
-            var worker = new RenderFarm.Domain.Worker("worker-1", "Worker 1", "host", "127.0.0.1", null, status, null, null, "test", capabilities, null, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow);
+            var worker = new RenderFarm.Domain.Worker("worker-1", "Worker 1", "host", "127.0.0.1", null, status, null, null, RenderFarmVersion.FormatWorkerAgentVersion(RenderFarmVersion.ProductVersion, RenderFarmVersion.ProtocolVersion, RenderFarmVersion.ApiContractVersion, RenderFarmVersion.BuildId), capabilities, null, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow);
 
             await Projects.UpsertAsync(project, CancellationToken.None);
             await Profiles.UpsertAsync(profile, CancellationToken.None);
@@ -615,5 +634,8 @@ public sealed class JobSchedulerTests
         }
     }
 }
+
+
+
 
 

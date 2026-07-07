@@ -351,6 +351,13 @@ function workerCard(worker) {
   const installText = installs.length ? installs.slice(0, 3).map(i => `UE ${escapeHtml(i.version)} ${i.exists ? 'ready' : 'missing'}`).join(' | ') : 'No Unreal installations reported';
   const pathText = paths.length ? paths.slice(0, 2).map(p => `${escapeHtml(p.path)} (${p.exists ? 'exists' : 'missing'})`).join('<br>') : 'No project paths reported';
   const outputText = outputs.length ? outputs.slice(0, 2).map(root => `${escapeHtml(root.path)} (${root.writable ? 'writable' : 'not writable'})`).join('<br>') : 'No output roots reported';
+  const compatibility = worker.compatibility || {};
+  const compatible = compatibility.compatible !== false;
+  const versionText = worker.productVersion || worker.agentVersion || '-';
+  const protocolText = worker.protocolVersion || '-';
+  const compatibilityText = compatible
+    ? `Worker ${escapeHtml(versionText)} / protocol ${escapeHtml(protocolText)}`
+    : escapeHtml(compatibility.reason || 'Worker version is incompatible.');
 
   return `
     <article class="worker-card ${className(worker.effectiveStatus || worker.status)}">
@@ -367,6 +374,7 @@ function workerCard(worker) {
         <span>Heartbeat <strong>${escapeHtml(formatRelative(worker.lastHeartbeatUtc))}</strong></span>
       </div>
       <div class="meta">Current job: ${escapeHtml(worker.currentJobId) || 'none'} | Agent: ${escapeHtml(worker.agentVersion) || '-'}</div>
+      <div class="meta">${badge(compatible ? 'Compatible' : 'IncompatibleVersion')} ${compatibilityText}</div>
       <div class="capability-chips">
         <span>CPU ${escapeHtml(caps.cpuCores) || '-'}</span>
         <span>RAM ${escapeHtml(caps.ramGb) || '-'} GB</span>
@@ -380,7 +388,6 @@ function workerCard(worker) {
     </article>
   `;
 }
-
 function workerActions(worker) {
   const approval = className(worker.approval);
   let actions = `<button class="button" type="button" data-fill-project-worker="${escapeHtml(worker.id)}">Use for project</button>`;
@@ -435,30 +442,262 @@ function renderOutputs() {
 }
 
 function renderProjects() {
-  byId('projects').innerHTML = projects().length ? projects().map(project => `
-    <article class="item">
-      <div class="item-head"><div class="item-title">${escapeHtml(project.displayName)}</div><span class="meta">${escapeHtml(project.id)}</span></div>
-      <div class="meta">${escapeHtml(project.uProjectPath) || 'No default project path'} | UE ${escapeHtml(project.preferredEngineVersion) || 'any'}</div>
-      <div class="inline-actions"><button class="button danger" type="button" data-delete-project="${escapeHtml(project.id)}">Delete</button></div>
-    </article>
-  `).join('') : empty('No render profiles yet. Add your first Unreal project to start queueing renders.');
+  const rail = byId('projects');
+  const detail = byId('selectedProjectPanel');
+  const selectedProject = ensureSelectedProject();
+
+  if (!selectedProject) {
+    rail.innerHTML = empty('No Unreal projects are registered yet. Add a project to start building reusable render setups.');
+    detail.innerHTML = `
+      <div class="project-empty-state">
+        <p class="eyebrow">Projects</p>
+        <h2>No project selected</h2>
+        <p>Add the first Unreal project, then save one or more render profiles for it.</p>
+        <button class="button primary" data-modal-target="projectModal" type="button">Add project</button>
+      </div>
+    `;
+    return;
+  }
+
+  rail.innerHTML = projects().map(project => renderProjectRailItem(project, selectedProject.id)).join('');
+  detail.innerHTML = renderSelectedProject(selectedProject);
 }
 
 function renderProfiles() {
-  byId('profiles').innerHTML = profiles().length ? profiles().map(profile => {
-    const settings = profile.settings || {};
-    return `
-      <article class="item">
-        <div class="item-head"><div class="item-title">${escapeHtml(profile.displayName)}</div>${badge(profile.type)}</div>
-        <div class="meta">Project ${escapeHtml(profile.projectId)} | Render asset ${escapeHtml(profile.assetPath) || 'template or manual launch'}</div>
-        <div class="meta">Map ${escapeHtml(settings.map || settings.level) || 'not set'}</div>
-        <div class="meta">Requirements: ${renderProfileRequirements(settings)}</div>
-        <div class="inline-actions"><button class="button primary" type="button" data-queue-profile="${escapeHtml(profile.id)}">Queue render</button><button class="button danger" type="button" data-delete-profile="${escapeHtml(profile.id)}">Delete</button></div>
-      </article>
-    `;
-  }).join('') : empty('No render setups are available yet. Use New Render to create a setup manually while queueing your first job.');
+  const target = byId('profiles');
+  if (target) target.innerHTML = '';
 }
 
+function ensureSelectedProject() {
+  const list = projects();
+  if (!list.length) {
+    state.selectedProjectId = null;
+    return null;
+  }
+
+  const selected = list.find(project => project.id === state.selectedProjectId) || list[0];
+  state.selectedProjectId = selected.id;
+  if (!['overview', 'profiles', 'jobs', 'paths', 'settings'].includes(state.selectedProjectTab)) {
+    state.selectedProjectTab = 'profiles';
+  }
+
+  return selected;
+}
+
+function renderProjectRailItem(project, selectedProjectId) {
+  const profileCount = projectProfiles(project.id).length;
+  const activeJobs = projectJobs(project.id).filter(row => ['queued', 'reserved', 'running', 'retrywait', 'rendering', 'launchingunreal', 'preparingunrealqueue', 'validatingworker', 'verifyingoutputs'].includes(className(row.job?.state))).length;
+  const path = project.uProjectPath || 'No default .uproject path';
+  return `
+    <button class="project-list-item ${project.id === selectedProjectId ? 'active' : ''}" type="button" data-select-project="${escapeHtml(project.id)}">
+      <span class="project-list-title">${escapeHtml(project.displayName || project.id)}</span>
+      <span class="project-list-meta">${escapeHtml(profileCount)} profile${profileCount === 1 ? '' : 's'} | ${escapeHtml(activeJobs)} active job${activeJobs === 1 ? '' : 's'}</span>
+      <span class="project-list-path" title="${escapeHtml(path)}">${escapeHtml(path)}</span>
+    </button>
+  `;
+}
+
+function renderSelectedProject(project) {
+  const projectProfileRows = projectProfiles(project.id);
+  const projectJobRows = projectJobs(project.id);
+  const stats = projectJobStats(projectJobRows);
+  const tabs = [
+    ['overview', 'Overview'],
+    ['profiles', `Render Profiles (${projectProfileRows.length})`],
+    ['jobs', `Jobs (${projectJobRows.length})`],
+    ['paths', 'Path Mappings'],
+    ['settings', 'Details']
+  ];
+  const primaryProfile = projectProfileRows[0];
+  const queueAction = primaryProfile
+    ? `<button class="button primary" type="button" data-queue-profile="${escapeHtml(primaryProfile.id)}">Queue render</button>`
+    : `<button class="button primary" type="button" data-open-profile-project="${escapeHtml(project.id)}">Add profile</button>`;
+
+  return `
+    <div class="project-detail-head">
+      <div class="project-title-block">
+        <p class="eyebrow">Selected project</p>
+        <h2>${escapeHtml(project.displayName || project.id)}</h2>
+        <button class="path-button project-path-button" type="button" data-copy="${escapeHtml(project.uProjectPath || '')}" data-copy-label="project path" title="${escapeHtml(project.uProjectPath || 'No default path')}">${escapeHtml(project.uProjectPath || 'No default .uproject path')}</button>
+        <div class="project-meta-line"><span>ID ${escapeHtml(project.id)}</span><span>UE ${escapeHtml(project.preferredEngineVersion || 'Any')}</span></div>
+      </div>
+      <div class="project-actions">
+        <button class="button" type="button" data-edit-project="${escapeHtml(project.id)}">Edit</button>
+        <button class="button" type="button" data-open-profile-project="${escapeHtml(project.id)}">Add profile</button>
+        ${queueAction}
+        <button class="button danger" type="button" data-delete-project="${escapeHtml(project.id)}">Delete</button>
+      </div>
+    </div>
+    <div class="project-stats">
+      ${projectStatCard('Profiles', projectProfileRows.length)}
+      ${projectStatCard('Queued', stats.queued)}
+      ${projectStatCard('Running', stats.running)}
+      ${projectStatCard('Completed', stats.completed)}
+      ${projectStatCard('Failed', stats.failed, stats.failed ? 'bad' : 'good')}
+    </div>
+    <div class="project-tabs" role="tablist" aria-label="Selected project sections">
+      ${tabs.map(([id, label]) => `<button class="project-tab ${state.selectedProjectTab === id ? 'active' : ''}" type="button" data-project-tab="${escapeHtml(id)}">${escapeHtml(label)}</button>`).join('')}
+    </div>
+    <div class="project-tab-body">
+      ${renderProjectTab(project, projectProfileRows, projectJobRows, stats)}
+    </div>
+  `;
+}
+
+function projectStatCard(label, value, tone = 'neutral') {
+  return `<article class="project-stat ${tone}"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></article>`;
+}
+
+function renderProjectTab(project, projectProfileRows, projectJobRows, stats) {
+  if (state.selectedProjectTab === 'overview') return renderProjectOverview(project, projectProfileRows, projectJobRows, stats);
+  if (state.selectedProjectTab === 'jobs') return renderProjectJobs(projectJobRows);
+  if (state.selectedProjectTab === 'paths') return renderProjectPaths(project);
+  if (state.selectedProjectTab === 'settings') return renderProjectSettings(project);
+  return renderProjectProfiles(project, projectProfileRows);
+}
+
+function renderProjectOverview(project, projectProfileRows, projectJobRows, stats) {
+  const latestJob = [...projectJobRows].sort((a, b) => new Date(b.job?.updatedAtUtc || 0) - new Date(a.job?.updatedAtUtc || 0))[0]?.job;
+  return `
+    <div class="project-detail-grid">
+      <article class="project-detail-card"><span>Default project path</span><strong title="${escapeHtml(project.uProjectPath || '')}">${escapeHtml(project.uProjectPath || 'Not set')}</strong></article>
+      <article class="project-detail-card"><span>Preferred engine</span><strong>${escapeHtml(project.preferredEngineVersion || 'Any installed Unreal version')}</strong></article>
+      <article class="project-detail-card"><span>Saved render profiles</span><strong>${escapeHtml(projectProfileRows.length)}</strong></article>
+      <article class="project-detail-card"><span>Current queue</span><strong>${escapeHtml(stats.queued)} queued, ${escapeHtml(stats.running)} running</strong></article>
+      <article class="project-detail-card wide"><span>Latest job</span><strong>${latestJob ? escapeHtml(latestJob.name || latestJob.id) : 'No jobs yet'}</strong><p>${latestJob ? `${escapeHtml(latestJob.state)} updated ${escapeHtml(formatRelative(latestJob.updatedAtUtc))}` : 'Queue a render from a saved profile when setup is ready.'}</p></article>
+    </div>
+  `;
+}
+
+function renderProjectProfiles(project, projectProfileRows) {
+  const filtered = filteredProjectProfiles(projectProfileRows);
+  const types = [...new Set(projectProfileRows.map(profile => profile.type).filter(Boolean))].sort();
+  return `
+    <div class="project-table-toolbar">
+      <label>Search profiles<input id="projectProfileSearch" type="search" value="${escapeHtml(state.projectProfileSearch)}" placeholder="Search name, ID, map, asset"></label>
+      <label>Type<select id="projectProfileType"><option value="">All types</option>${types.map(type => `<option value="${escapeHtml(type)}" ${state.projectProfileType === type ? 'selected' : ''}>${escapeHtml(type)}</option>`).join('')}</select></label>
+      <label>Sort<select id="projectProfileSort"><option value="name" ${state.projectProfileSort === 'name' ? 'selected' : ''}>Name</option><option value="type" ${state.projectProfileSort === 'type' ? 'selected' : ''}>Type</option><option value="map" ${state.projectProfileSort === 'map' ? 'selected' : ''}>Map</option></select></label>
+      <button class="button primary" type="button" data-open-profile-project="${escapeHtml(project.id)}">Add profile</button>
+    </div>
+    ${filtered.length ? `
+      <div class="table-wrap project-table-wrap">
+        <table class="compact-table">
+          <thead><tr><th>Name</th><th>Type</th><th>Map</th><th>Asset / Queue</th><th>Requirements</th><th>Actions</th></tr></thead>
+          <tbody>${filtered.map(renderProjectProfileRow).join('')}</tbody>
+        </table>
+      </div>
+    ` : empty(projectProfileRows.length ? 'No profiles match the current filter.' : 'No render profiles yet. Add one profile for this project to make queueing repeatable.')}
+  `;
+}
+
+function renderProjectProfileRow(profile) {
+  const settings = profile.settings || {};
+  const map = profileMap(profile);
+  const asset = profileAsset(profile);
+  return `
+    <tr>
+      <td><strong>${escapeHtml(profile.displayName || profile.id)}</strong><div class="meta">${escapeHtml(profile.id)}</div></td>
+      <td>${badge(profile.type)}</td>
+      <td><span class="table-clip" title="${escapeHtml(map)}">${escapeHtml(map)}</span></td>
+      <td><span class="table-clip" title="${escapeHtml(asset)}">${escapeHtml(asset)}</span></td>
+      <td>${renderProfileRequirements(settings)}</td>
+      <td><div class="table-actions"><button class="button primary compact-button" type="button" data-queue-profile="${escapeHtml(profile.id)}">Queue</button><button class="button compact-button" type="button" data-edit-profile="${escapeHtml(profile.id)}">Edit</button><button class="button compact-button" type="button" data-duplicate-profile="${escapeHtml(profile.id)}">Duplicate</button><button class="button danger compact-button" type="button" data-delete-profile="${escapeHtml(profile.id)}">Delete</button></div></td>
+    </tr>
+  `;
+}
+
+function renderProjectJobs(projectJobRows) {
+  const rows = [...projectJobRows].sort((a, b) => new Date(b.job?.updatedAtUtc || 0) - new Date(a.job?.updatedAtUtc || 0));
+  if (!rows.length) return empty('No jobs have been queued for this project yet.');
+  return `
+    <div class="table-wrap project-table-wrap">
+      <table class="compact-table">
+        <thead><tr><th>Name</th><th>State</th><th>Profile</th><th>Worker</th><th>Attempts</th><th>Updated</th></tr></thead>
+        <tbody>${rows.map(row => {
+          const job = row.job;
+          return `<tr data-job-id="${escapeHtml(job.id)}" tabindex="0" title="Open job details"><td><strong>${escapeHtml(job.name || job.id)}</strong><div class="meta">${escapeHtml(job.id)}</div></td><td>${badge(job.state)}</td><td>${escapeHtml(job.renderProfileId)}</td><td>${escapeHtml(job.assignedWorkerId || '-')}</td><td>${escapeHtml(row.attemptCount ?? 0)}</td><td>${formatDate(job.updatedAtUtc)}</td></tr>`;
+        }).join('')}</tbody>
+      </table>
+    </div>
+  `;
+}
+
+function renderProjectPaths(project) {
+  const paths = project.workerPaths || project.workerProjectPaths || [];
+  if (!paths.length) {
+    return empty('No worker-specific path mappings are saved for this project. Workers will use the default .uproject path if it is reachable.');
+  }
+
+  return `
+    <div class="table-wrap project-table-wrap">
+      <table class="compact-table">
+        <thead><tr><th>Worker</th><th>Project path</th><th>Engine root</th><th>Log directory</th></tr></thead>
+        <tbody>${paths.map(path => `<tr><td>${escapeHtml(path.workerId || '-')}</td><td><span class="table-clip wide" title="${escapeHtml(path.projectPath || '')}">${escapeHtml(path.projectPath || '-')}</span></td><td><span class="table-clip" title="${escapeHtml(path.enginePath || '')}">${escapeHtml(path.enginePath || '-')}</span></td><td><span class="table-clip" title="${escapeHtml(path.logDirectory || '')}">${escapeHtml(path.logDirectory || '-')}</span></td></tr>`).join('')}</tbody>
+      </table>
+    </div>
+  `;
+}
+
+function renderProjectSettings(project) {
+  const allowed = project.allowedEngineVersions?.length ? project.allowedEngineVersions.join(', ') : 'Any';
+  return `
+    <div class="project-detail-grid">
+      <article class="project-detail-card"><span>Project ID</span><strong>${escapeHtml(project.id)}</strong></article>
+      <article class="project-detail-card"><span>Display name</span><strong>${escapeHtml(project.displayName || '-')}</strong></article>
+      <article class="project-detail-card"><span>Preferred engine</span><strong>${escapeHtml(project.preferredEngineVersion || 'Any')}</strong></article>
+      <article class="project-detail-card"><span>Allowed engines</span><strong>${escapeHtml(allowed)}</strong></article>
+      <article class="project-detail-card wide"><span>Default .uproject path</span><strong title="${escapeHtml(project.uProjectPath || '')}">${escapeHtml(project.uProjectPath || 'Not set')}</strong></article>
+    </div>
+  `;
+}
+
+function filteredProjectProfiles(projectProfileRows) {
+  const query = state.projectProfileSearch.trim().toLowerCase();
+  const type = state.projectProfileType;
+  const filtered = projectProfileRows.filter(profile => {
+    const settings = profile.settings || {};
+    const blob = [profile.id, profile.displayName, profile.type, profile.assetPath, settings.map, settings.level, settings.sequence, settings.levelSequence]
+      .map(value => text(value).toLowerCase())
+      .join(' ');
+    return (!query || blob.includes(query)) && (!type || profile.type === type);
+  });
+
+  return filtered.sort((a, b) => {
+    if (state.projectProfileSort === 'type') return text(a.type).localeCompare(text(b.type)) || text(a.displayName).localeCompare(text(b.displayName));
+    if (state.projectProfileSort === 'map') return profileMap(a).localeCompare(profileMap(b)) || text(a.displayName).localeCompare(text(b.displayName));
+    return text(a.displayName || a.id).localeCompare(text(b.displayName || b.id));
+  });
+}
+
+function projectProfiles(projectId) {
+  return profiles().filter(profile => profile.projectId === projectId);
+}
+
+function projectJobs(projectId) {
+  return jobs().filter(row => row.job?.projectId === projectId);
+}
+
+function projectJobStats(projectJobRows) {
+  const stats = { queued: 0, running: 0, completed: 0, failed: 0 };
+  projectJobRows.forEach(row => {
+    const group = queueGroup(row.job?.state);
+    if (group === 'queued') stats.queued += 1;
+    else if (group === 'running') stats.running += 1;
+    else if (group === 'completed') stats.completed += 1;
+    else if (group === 'failed') stats.failed += 1;
+  });
+  return stats;
+}
+
+function profileMap(profile) {
+  const settings = profile.settings || {};
+  return settings.map || settings.mapName || settings.level || settings.levelName || 'Not set';
+}
+
+function profileAsset(profile) {
+  const settings = profile.settings || {};
+  return profile.assetPath || settings.moviePipelineConfig || settings.mrqConfig || settings.queue || profile.commandTemplate || 'Template/manual launch';
+}
 function renderJobValidationSummary(job) {
   const validation = job?.validation;
   if (!validation) return '<div class="validation-mini neutral"><strong>Not validated</strong><span>Open details to review setup.</span></div>';
@@ -671,6 +910,8 @@ function availableWorkers() {
 function empty(message) {
   return `<div class="empty">${escapeHtml(message)}</div>`;
 }
+
+
 
 
 

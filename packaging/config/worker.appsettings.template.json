@@ -1,10 +1,10 @@
 {
   "RenderFarm": {
-    "ControllerUrl": "http://CONTROLLER_IP:9200",
+    "ControllerUrl": "",
     "ApiToken": "",
     "WorkerId": "",
     "DisplayName": "",
-    "DiscoveryEnabled": false,
+    "DiscoveryEnabled": true,
     "DiscoverySeconds": 5,
     "DiscoveryPort": 39200,
     "ServiceUrl": "http://127.0.0.1:9100",
@@ -22,7 +22,11 @@
       "C:\\Program Files\\Epic Games"
     ],
     "AttemptLogRoot": "logs\\attempts",
-    "WorkerStateFilePath": "state\\worker-current-job.json"
+    "WorkerStateFilePath": "state\\worker-current-job.json",
+    "ControllerPort": 9200,
+    "LanScanEnabled": true,
+    "LanScanTimeoutSeconds": 4,
+    "LanScanMaxHosts": 254
   },
   "Logging": {
     "LogLevel": {

@@ -11,11 +11,22 @@ param(
     [string]$WorkerId = "",
     [string]$DisplayName = "",
     [string]$ApiToken = "",
+    [switch]$DiscoveryEnabled,
+    [ValidateRange(1, 30)]
+    [int]$DiscoverySeconds = 5,
+    [ValidateRange(1, 65535)]
+    [int]$DiscoveryPort = 39200,
+    [switch]$LanScanEnabled,
+    [ValidateRange(1, 30)]
+    [int]$LanScanTimeoutSeconds = 4,
+    [ValidateRange(1, 4096)]
+    [int]$LanScanMaxHosts = 254,
     [ValidateSet("Debug", "Release")]
     [string]$Configuration = "Debug"
 )
 
 $ErrorActionPreference = "Stop"
+if (-not $PSBoundParameters.ContainsKey("LanScanEnabled")) { $LanScanEnabled = $true }
 
 function Get-DefaultSettingsPath {
     $base = if ($env:LOCALAPPDATA) { $env:LOCALAPPDATA } else { Join-Path $PSScriptRoot "..\.renderfarm" }
@@ -55,6 +66,12 @@ if (-not $DisplayName -and $stored -and $stored.displayName) { $DisplayName = [s
 if (-not $ApiToken -and $stored -and $stored.apiToken) { $ApiToken = [string]$stored.apiToken }
 if (-not $PSBoundParameters.ContainsKey("HostName") -and $stored -and $stored.hostName) { $HostName = [string]$stored.hostName }
 if (-not $PSBoundParameters.ContainsKey("Port") -and $stored -and $stored.port) { $Port = [int]$stored.port }
+if (-not $PSBoundParameters.ContainsKey("DiscoveryEnabled") -and $stored -and $null -ne $stored.discoveryEnabled) { if ([bool]$stored.discoveryEnabled) { $DiscoveryEnabled = $true } }
+if (-not $PSBoundParameters.ContainsKey("DiscoverySeconds") -and $stored -and $stored.discoverySeconds) { $DiscoverySeconds = [int]$stored.discoverySeconds }
+if (-not $PSBoundParameters.ContainsKey("DiscoveryPort") -and $stored -and $stored.discoveryPort) { $DiscoveryPort = [int]$stored.discoveryPort }
+if (-not $PSBoundParameters.ContainsKey("LanScanEnabled") -and $stored -and $null -ne $stored.lanScanEnabled) { if ([bool]$stored.lanScanEnabled) { $LanScanEnabled = $true } }
+if (-not $PSBoundParameters.ContainsKey("LanScanTimeoutSeconds") -and $stored -and $stored.lanScanTimeoutSeconds) { $LanScanTimeoutSeconds = [int]$stored.lanScanTimeoutSeconds }
+if (-not $PSBoundParameters.ContainsKey("LanScanMaxHosts") -and $stored -and $stored.lanScanMaxHosts) { $LanScanMaxHosts = [int]$stored.lanScanMaxHosts }
 
 if (-not $Role) {
     Write-Host "RenderFarm needs a machine role before it can start."
@@ -63,7 +80,8 @@ if (-not $Role) {
     Write-Host ""
     Write-Host "Choose and save a role with one of these commands:"
     Write-Host "  .\scripts\start-renderfarm.ps1 -Role controller -SaveRole"
-    Write-Host "  .\scripts\start-renderfarm.ps1 -Role worker -ControllerUrl http://CONTROLLER_IP:9200 -SaveRole"
+    Write-Host "  .\scripts\start-renderfarm.ps1 -Role controller -HostName 0.0.0.0 -DiscoveryEnabled -SaveRole"
+    Write-Host "  .\scripts\start-renderfarm.ps1 -Role worker -DiscoveryEnabled -SaveRole"
     throw "No RenderFarm role was supplied or saved."
 }
 
@@ -76,6 +94,12 @@ if ($SaveRole) {
         workerId = $WorkerId
         displayName = $DisplayName
         apiToken = $ApiToken
+        discoveryEnabled = [bool]$DiscoveryEnabled
+        discoverySeconds = $DiscoverySeconds
+        discoveryPort = $DiscoveryPort
+        lanScanEnabled = [bool]$LanScanEnabled
+        lanScanTimeoutSeconds = $LanScanTimeoutSeconds
+        lanScanMaxHosts = $LanScanMaxHosts
         updatedUtc = [DateTimeOffset]::UtcNow.ToString("O")
     }
     Write-RoleSettings -Path $SettingsPath -Settings $settings
@@ -86,18 +110,19 @@ switch ($Role) {
     "controller" {
         $script = Join-Path $PSScriptRoot "start_controller.ps1"
         Write-Host "Launching this machine as the RenderFarm controller."
-        if ($ApiToken) {
-            & $script -HostName $HostName -Port $Port -Configuration $Configuration -ApiToken $ApiToken
-        }
-        else {
-            & $script -HostName $HostName -Port $Port -Configuration $Configuration
-        }
+        $controllerArgs = @('-HostName', $HostName, '-Port', $Port, '-Configuration', $Configuration, '-DiscoveryPort', $DiscoveryPort)
+        if ($ApiToken) { $controllerArgs += @('-ApiToken', $ApiToken) }
+        if ($DiscoveryEnabled) { $controllerArgs += '-DiscoveryEnabled' }
+        & $script @controllerArgs
         exit $LASTEXITCODE
     }
     "worker" {
         $script = Join-Path $PSScriptRoot "start_worker.ps1"
         Write-Host "Launching this machine as a RenderFarm worker."
-        & $script -Configuration $Configuration -ControllerUrl $ControllerUrl -WorkerId $WorkerId -DisplayName $DisplayName -ApiToken $ApiToken
+        $workerArgs = @('-Configuration', $Configuration, '-ControllerUrl', $ControllerUrl, '-WorkerId', $WorkerId, '-DisplayName', $DisplayName, '-ApiToken', $ApiToken, '-DiscoverySeconds', $DiscoverySeconds, '-DiscoveryPort', $DiscoveryPort, '-ControllerPort', $Port, '-LanScanTimeoutSeconds', $LanScanTimeoutSeconds, '-LanScanMaxHosts', $LanScanMaxHosts)
+        if ($DiscoveryEnabled) { $workerArgs += '-DiscoveryEnabled' }
+        if ($LanScanEnabled) { $workerArgs += '-LanScanEnabled' }
+        & $script @workerArgs
         exit $LASTEXITCODE
     }
     default {

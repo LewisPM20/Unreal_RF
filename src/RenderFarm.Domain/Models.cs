@@ -32,6 +32,7 @@ public enum WorkerStatus
     Idle,
     Busy,
     Error,
+    IncompatibleVersion,
     Disabled
 }
 
@@ -211,4 +212,5 @@ public sealed record JobLease(
     DateTimeOffset? ReleasedAtUtc,
     string? ReleaseReason,
     bool IsActive);
+
 

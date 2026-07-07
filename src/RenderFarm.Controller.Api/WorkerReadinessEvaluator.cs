@@ -15,6 +15,18 @@ public static class WorkerReadinessEvaluator
         var (hasUnreal, unrealVersion) = HasCompatibleUnreal(worker, project, profile, workerPath, defaults, reasons);
         var (canWriteOutput, hasEnoughDisk) = CanWriteOutput(worker, profile, requestedOutputDirectory, defaults, reasons);
         var meetsProfileRequirements = MeetsProfileRequirements(worker, profile, reasons);
+        var compatibility = RenderFarmVersion.EvaluateWorkerAgent(worker.AgentVersion);
+        if (!compatibility.Compatible)
+        {
+            reasons.Add(compatibility.Reason);
+        }
+
+        var heartbeatFresh = DateTimeOffset.UtcNow - worker.LastHeartbeatUtc <= TimeSpan.FromSeconds(30);
+        if (!heartbeatFresh)
+        {
+            reasons.Add($"Worker heartbeat is stale ({Math.Max(0, (int)(DateTimeOffset.UtcNow - worker.LastHeartbeatUtc).TotalSeconds)}s old).");
+        }
+
         var statusOk = worker.Status is WorkerStatus.Online or WorkerStatus.Idle;
         if (!statusOk)
         {
@@ -25,7 +37,7 @@ public static class WorkerReadinessEvaluator
             worker.Id,
             project.Id,
             profile?.Id,
-            statusOk && hasProjectPath && hasUnreal && canWriteOutput && hasEnoughDisk && meetsProfileRequirements,
+            compatibility.Compatible && heartbeatFresh && statusOk && hasProjectPath && hasUnreal && canWriteOutput && hasEnoughDisk && meetsProfileRequirements,
             hasProjectPath,
             hasUnreal,
             canWriteOutput,

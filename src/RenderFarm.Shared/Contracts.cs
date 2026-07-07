@@ -27,7 +27,11 @@ public sealed record WorkerHeartbeatDto(
     string? CurrentJobId,
     string? AgentVersion,
     WorkerCapabilitiesDto Capabilities,
-    string? LastError);
+    string? LastError,
+    string? ProductVersion = null,
+    int? ProtocolVersion = null,
+    int? ApiContractVersion = null,
+    string? BuildId = null);
 
 /// <summary>
 /// Worker information returned by the controller.
@@ -45,7 +49,12 @@ public sealed record WorkerDto(
     WorkerCapabilitiesDto Capabilities,
     string? LastError,
     DateTimeOffset RegisteredAtUtc,
-    DateTimeOffset LastHeartbeatUtc);
+    DateTimeOffset LastHeartbeatUtc,
+    string? ProductVersion = null,
+    int? ProtocolVersion = null,
+    int? ApiContractVersion = null,
+    string? BuildId = null,
+    VersionCompatibility? Compatibility = null);
 
 /// <summary>
 /// Serializable worker capability DTO used by controller/worker APIs.
@@ -423,12 +432,12 @@ public sealed record JobStartRequest(string LeaseId, string WorkerId, string? Me
 /// <summary>
 /// Request to mark a leased job as complete.
 /// </summary>
-public sealed record JobCompletionRequest(string LeaseId, string WorkerId, int? ExitCode = 0, string? OutputDirectory = null, string? Message = null, RenderArtifactSummaryDto? ArtifactSummary = null);
+public sealed record JobCompletionRequest(string LeaseId, string WorkerId, int? ExitCode = 0, string? OutputDirectory = null, string? Message = null, RenderArtifactSummaryDto? ArtifactSummary = null, OutputValidationSummaryDto? OutputValidation = null);
 
 /// <summary>
 /// Request to mark a leased job as failed.
 /// </summary>
-public sealed record JobFailureRequest(string LeaseId, string WorkerId, FailureCategory FailureCategory, string Error, int? ExitCode = null, bool RetryEligible = true);
+public sealed record JobFailureRequest(string LeaseId, string WorkerId, FailureCategory FailureCategory, string Error, int? ExitCode = null, bool RetryEligible = true, OutputValidationSummaryDto? OutputValidation = null, PreflightResultDto? Preflight = null);
 
 /// <summary>
 /// Request to change whether a worker may receive new jobs.
@@ -485,7 +494,12 @@ public sealed record DashboardWorkerDto(
     string? LastError,
     DateTimeOffset RegisteredAtUtc,
     DateTimeOffset LastHeartbeatUtc,
-    int SecondsSinceHeartbeat);
+    int SecondsSinceHeartbeat,
+    string? ProductVersion = null,
+    int? ProtocolVersion = null,
+    int? ApiContractVersion = null,
+    string? BuildId = null,
+    VersionCompatibility? Compatibility = null);
 
 /// <summary>
 /// Job row optimized for the dashboard.
@@ -517,26 +531,36 @@ public static class RenderFarmContractMapper
         Status: Enum.TryParse<WorkerStatus>(heartbeat.Status, true, out var status) ? status : WorkerStatus.Unknown,
         Stage: heartbeat.Stage,
         CurrentJobId: heartbeat.CurrentJobId,
-        AgentVersion: heartbeat.AgentVersion,
+        AgentVersion: RenderFarmVersion.FormatWorkerAgentVersion(heartbeat.ProductVersion ?? heartbeat.AgentVersion, heartbeat.ProtocolVersion, heartbeat.ApiContractVersion, heartbeat.BuildId),
         Capabilities: heartbeat.Capabilities.ToDomain(),
         LastError: heartbeat.LastError,
         RegisteredAtUtc: receivedAtUtc,
         LastHeartbeatUtc: receivedAtUtc);
 
-    public static WorkerDto ToDto(this Worker worker) => new(
-        worker.Id,
-        worker.Name,
-        worker.Hostname,
-        worker.IpAddress,
-        worker.ServiceUrl,
-        worker.Status,
-        worker.Stage,
-        worker.CurrentJobId,
-        worker.AgentVersion,
-        worker.Capabilities.ToDto(),
-        worker.LastError,
-        worker.RegisteredAtUtc,
-        worker.LastHeartbeatUtc);
+    public static WorkerDto ToDto(this Worker worker)
+    {
+        var version = RenderFarmVersion.ParseWorkerAgentVersion(worker.AgentVersion);
+        var compatibility = RenderFarmVersion.EvaluateWorkerAgent(worker.AgentVersion);
+        return new WorkerDto(
+            worker.Id,
+            worker.Name,
+            worker.Hostname,
+            worker.IpAddress,
+            worker.ServiceUrl,
+            worker.Status,
+            worker.Stage,
+            worker.CurrentJobId,
+            worker.AgentVersion,
+            worker.Capabilities.ToDto(),
+            worker.LastError,
+            worker.RegisteredAtUtc,
+            worker.LastHeartbeatUtc,
+            version.ProductVersion,
+            version.ProtocolVersion,
+            version.ApiContractVersion,
+            version.BuildId,
+            compatibility);
+    }
 
     public static WorkerCapabilities ToDomain(this WorkerCapabilitiesDto dto) => new(
         dto.CpuCores,
@@ -612,6 +636,10 @@ public static class RenderFarmContractMapper
         }
     }
 }
+
+
+
+
 
 
 

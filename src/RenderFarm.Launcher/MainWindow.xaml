@@ -162,6 +162,14 @@
                         </StackPanel>
                     </Border>
 
+                    <Border Background="{StaticResource PanelBrush}" BorderBrush="{StaticResource BorderBrushSoft}" BorderThickness="1" CornerRadius="12" Padding="18" Margin="0,0,0,16">
+                        <StackPanel>
+                            <TextBlock Text="LAN discovery" FontSize="18" FontWeight="SemiBold" />
+                            <TextBlock x:Name="DiscoveryModeHelpText" Text="Controller mode: advertise this controller on the LAN for workers. Worker mode: find a LAN controller when Controller URL is blank." Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" Margin="0,6,0,12" />
+                            <CheckBox x:Name="DiscoveryEnabledBox" Content="Enable LAN discovery" />
+                            <TextBlock Text="LAN mode requires Windows Firewall to allow TCP 9200 and UDP 39200. Some WiFi networks block device-to-device discovery even when both PCs are on the same SSID." Foreground="{StaticResource AmberBrush}" TextWrapping="Wrap" />
+                        </StackPanel>
+                    </Border>
                     <Border x:Name="WorkerPanel" Background="{StaticResource PanelBrush}" BorderBrush="{StaticResource BorderBrushSoft}" BorderThickness="1" CornerRadius="12" Padding="18" Margin="0,0,0,16">
                         <StackPanel>
                             <TextBlock Text="Worker settings" FontSize="18" FontWeight="SemiBold" />
@@ -169,8 +177,6 @@
 
                             <TextBlock Text="Controller URL" FontWeight="SemiBold" />
                             <TextBox x:Name="ControllerUrlBox" />
-
-                            <CheckBox x:Name="DiscoveryEnabledBox" Content="Allow LAN discovery when Controller URL is blank" />
 
                             <Grid>
                                 <Grid.ColumnDefinitions>
@@ -225,11 +231,22 @@
                 <StackPanel Orientation="Horizontal" DockPanel.Dock="Left">
                     <Button x:Name="StartRoleButton" Content="Start selected role" Click="StartRole_Click" />
                     <Button x:Name="OpenDashboardButton" Content="Open dashboard" Style="{StaticResource SecondaryButton}" Click="OpenDashboard_Click" />
+                    <Button Content="Stop RenderFarm processes" Style="{StaticResource SecondaryButton}" Click="StopTrackedProcesses_Click" />
+                    <Button Content="Test job dispatch" Style="{StaticResource SecondaryButton}" Click="TestJobDispatch_Click" />
+                    <Button Content="Clear stale state" Style="{StaticResource SecondaryButton}" Click="ClearStaleRuntime_Click" />
+                    <Button Content="Configure Controller Firewall" Style="{StaticResource SecondaryButton}" Click="ConfigureControllerFirewall_Click" />
+                    <Button Content="Configure Worker Firewall" Style="{StaticResource SecondaryButton}" Click="ConfigureWorkerFirewall_Click" />
                 </StackPanel>
                 <StackPanel Orientation="Horizontal" DockPanel.Dock="Right">
-                    <TextBlock Text="Controller dashboard: http://127.0.0.1:9200/" Foreground="{StaticResource MutedTextBrush}" VerticalAlignment="Center" />
+                    <TextBlock x:Name="FooterUrlText" Text="Controller URLs are shown in Status after startup." Foreground="{StaticResource MutedTextBrush}" VerticalAlignment="Center" />
                 </StackPanel>
             </DockPanel>
         </Border>
     </Grid>
 </Window>
+
+
+
+
+
+

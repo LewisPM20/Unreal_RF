@@ -134,10 +134,12 @@ public sealed class JobScheduler(
     IRenderProfileRepository profiles,
     IRetryPolicy retryPolicy,
     Microsoft.Extensions.Options.IOptions<JobSchedulerOptions> options,
+    IDispatchDiagnostics? dispatchDiagnostics = null,
     IJobNotificationSink? notificationSink = null,
     ILogger<JobScheduler>? logger = null) : IJobScheduler
 {
     private readonly SemaphoreSlim _sync = new(1, 1);
+    private readonly IDispatchDiagnostics _dispatchDiagnostics = dispatchDiagnostics ?? new InMemoryDispatchDiagnostics();
     private readonly IJobNotificationSink _notificationSink = notificationSink ?? NullJobNotificationSink.Instance;
 
     public async Task<RenderJob> CreateJobAsync(CreateRenderJobRequest request, CancellationToken cancellationToken)
@@ -226,18 +228,30 @@ public sealed class JobScheduler(
             var worker = await workers.GetAsync(workerId, cancellationToken);
             if (worker is null)
             {
-                return new(false, null, null, null, "Worker is not registered.");
+                return NoAssignment(null, workerId, null, "worker-not-registered", "Worker is not registered.");
+            }
+
+            var compatibility = RenderFarmVersion.EvaluateWorkerAgent(worker.AgentVersion);
+            if (!compatibility.Compatible)
+            {
+                return NoAssignment(worker, workerId, null, "worker-incompatible-version", compatibility.Reason);
+            }
+
+            var heartbeatAge = DateTimeOffset.UtcNow - worker.LastHeartbeatUtc;
+            if (heartbeatAge > TimeSpan.FromSeconds(30))
+            {
+                return NoAssignment(worker, workerId, null, "worker-heartbeat-stale", $"Worker heartbeat is stale ({(int)heartbeatAge.TotalSeconds}s old). Wait for a fresh heartbeat or restart/update the worker service.");
             }
 
             if (!IsWorkerAvailable(worker))
             {
-                return new(false, null, null, null, $"Worker status {worker.Status} is not eligible for scheduling.");
+                return NoAssignment(worker, workerId, null, "worker-not-available", $"Worker status {worker.Status} is not eligible for scheduling.");
             }
 
             var schedulingMode = await WorkerScheduling.GetAsync(settings, worker.Id, cancellationToken);
             if (schedulingMode != WorkerSchedulingMode.Active)
             {
-                return new(false, null, null, null, $"Worker scheduling mode {schedulingMode} does not allow new assignments.");
+                return NoAssignment(worker, workerId, null, "worker-scheduling-disabled", $"Worker scheduling mode {schedulingMode} does not allow new assignments.");
             }
 
             var defaults = await ControllerRenderDefaults.LoadAsync(settings, cancellationToken);
@@ -245,6 +259,7 @@ public sealed class JobScheduler(
             {
                 if (await leases.GetActiveForJobAsync(job.Id, cancellationToken) is not null)
                 {
+                    RecordDispatchDecision(worker, job, "job-already-leased", "Another active lease already owns this queued job.", assigned: false);
                     continue;
                 }
 
@@ -252,13 +267,16 @@ public sealed class JobScheduler(
                 var profile = await profiles.GetAsync(job.RenderProfileId, cancellationToken);
                 if (project is null || profile is null || profile.ProjectId != project.Id)
                 {
+                    RecordDispatchDecision(worker, job, "job-invalid-project-profile", "Job references a missing project/profile or a profile from another project.", assigned: false);
                     continue;
                 }
 
                 var readiness = WorkerReadinessEvaluator.Evaluate(worker, project, profile, job.OutputDirectory, defaults);
                 if (!readiness.CanRun)
                 {
-                    logger?.LogDebug("Worker {WorkerId} is not ready for job {JobId}: {Reasons}", worker.Id, job.Id, string.Join("; ", readiness.Reasons));
+                    var reason = readiness.Reasons.Count == 0 ? "Worker readiness check failed." : string.Join("; ", readiness.Reasons);
+                    RecordDispatchDecision(worker, job, "worker-readiness-rejected", reason, assigned: false);
+                    logger?.LogDebug("Worker {WorkerId} is not ready for job {JobId}: {Reasons}", worker.Id, job.Id, reason);
                     continue;
                 }
 
@@ -305,6 +323,7 @@ public sealed class JobScheduler(
                 }
                 catch (InvalidOperationException ex)
                 {
+                    RecordDispatchDecision(worker, job, "execution-payload-rejected", ex.Message, assigned: false);
                     logger?.LogWarning(ex, "Controller could not resolve execution payload for job {JobId} and worker {WorkerId}", job.Id, worker.Id);
                     continue;
                 }
@@ -314,16 +333,17 @@ public sealed class JobScheduler(
                     Attempt: attempt,
                     Lease: lease,
                     Event: CreateEvent(job.Id, attempt.Id, worker.Id, JobState.Reserved, FailureCategory.None, $"Job reserved by worker {worker.Id}", JsonSerializer.Serialize(execution, RenderFarmJson.SerializerOptions))), cancellationToken);
+                RecordDispatchDecision(worker, reservedJob, "job-assigned", "Job assigned and lease persisted.", assigned: true);
                 return new(true, reservedJob.ToDto(), attempt.ToDto(), lease.ToDto(), "Job assigned.", execution);
             }
-            return new(false, null, null, null, "No suitable queued job is available.");
+
+            return NoAssignment(worker, workerId, null, "no-suitable-queued-job", "No suitable queued job is available.");
         }
         finally
         {
             _sync.Release();
         }
     }
-
     public async Task<JobLeaseDto?> RenewLeaseAsync(string jobId, JobLeaseRenewalRequest request, CancellationToken cancellationToken)
     {
         await _sync.WaitAsync(cancellationToken);
@@ -424,7 +444,7 @@ public sealed class JobScheduler(
                 Job: completedJob,
                 Attempt: completedAttempt,
                 Lease: releasedLease,
-                Event: CreateEvent(jobId, attempt.Id, lease.WorkerId, JobState.Succeeded, FailureCategory.None, request.Message ?? "Job completed", request.ArtifactSummary is null ? null : JsonSerializer.Serialize(request.ArtifactSummary, RenderFarmJson.SerializerOptions))), cancellationToken);
+                Event: CreateEvent(jobId, attempt.Id, lease.WorkerId, JobState.Succeeded, FailureCategory.None, request.Message ?? "Job completed", BuildCompletionEventData(request))), cancellationToken);
             await NotifyTerminalJobAsync(completedJob, lease.WorkerId, cancellationToken);
             return completedJob.ToDto();
         }
@@ -502,7 +522,7 @@ public sealed class JobScheduler(
                 Job: nextJob,
                 Attempt: failedAttempt,
                 Lease: releasedLease,
-                Event: CreateEvent(jobId, attempt.Id, lease.WorkerId, nextJob.State, request.FailureCategory, decision.ShouldRetry ? $"Job failed and will retry: {request.Error}. {decision.Reason}" : $"Job failed: {request.Error}. {decision.Reason}", null)), cancellationToken);
+                Event: CreateEvent(jobId, attempt.Id, lease.WorkerId, nextJob.State, request.FailureCategory, decision.ShouldRetry ? $"Job failed and will retry: {request.Error}. {decision.Reason}" : $"Job failed: {request.Error}. {decision.Reason}", BuildFailureEventData(request))), cancellationToken);
             if (nextJob.State == JobState.Failed)
             {
                 await NotifyTerminalJobAsync(nextJob, lease.WorkerId, cancellationToken);
@@ -824,6 +844,29 @@ public sealed class JobScheduler(
     private static int? TryGetInt(string? value) => int.TryParse(value, out var parsed) ? parsed : null;
 
     private static string FirstNonEmpty(params string?[] values) => values.FirstOrDefault(x => !string.IsNullOrWhiteSpace(x)) ?? string.Empty;
+
+    private JobAssignmentDto NoAssignment(Worker? worker, string workerId, RenderJob? job, string decision, string reason)
+    {
+        RecordDispatchDecision(worker, workerId, job, decision, reason, assigned: false);
+        return new(false, null, null, null, reason);
+    }
+
+    private void RecordDispatchDecision(Worker worker, RenderJob? job, string decision, string reason, bool assigned) =>
+        RecordDispatchDecision(worker, worker.Id, job, decision, reason, assigned);
+
+    private void RecordDispatchDecision(Worker? worker, string workerId, RenderJob? job, string decision, string reason, bool assigned)
+    {
+        _dispatchDiagnostics.Record(worker, workerId, job, decision, reason, assigned);
+        if (assigned)
+        {
+            logger?.LogInformation("Dispatch accepted worker {WorkerId} job {JobId}: {Reason}", workerId, job?.Id ?? "none", reason);
+        }
+        else
+        {
+            logger?.LogInformation("Dispatch rejected worker {WorkerId} job {JobId}: {Decision}. {Reason}", workerId, job?.Id ?? "none", decision, reason);
+        }
+    }
+
     private static bool IsWorkerAvailable(Worker worker) => worker.Status is WorkerStatus.Online or WorkerStatus.Idle;
 
     private static bool IsTerminal(JobState state) => JobStateMachine.IsTerminal(state);
@@ -858,7 +901,34 @@ public sealed class JobScheduler(
     private static JobEvent CreateEvent(string jobId, string? attemptId, string? workerId, JobState? state, FailureCategory category, string message, string? dataJson) =>
         new(Guid.NewGuid().ToString("N"), jobId, attemptId, workerId, state, category, message, DateTimeOffset.UtcNow, dataJson);
 
+    private static string? BuildCompletionEventData(JobCompletionRequest request)
+    {
+        if (request.ArtifactSummary is null && request.OutputValidation is null)
+        {
+            return null;
+        }
+
+        return request.OutputValidation is null
+            ? JsonSerializer.Serialize(request.ArtifactSummary, RenderFarmJson.SerializerOptions)
+            : JsonSerializer.Serialize(new { artifactSummary = request.ArtifactSummary, outputValidation = request.OutputValidation }, RenderFarmJson.SerializerOptions);
+    }
+
+    private static string? BuildFailureEventData(JobFailureRequest request)
+    {
+        if (request.OutputValidation is null && request.Preflight is null)
+        {
+            return null;
+        }
+
+        return JsonSerializer.Serialize(new { outputValidation = request.OutputValidation, preflight = request.Preflight }, RenderFarmJson.SerializerOptions);
+    }
     private Task AppendEventAsync(string jobId, string? attemptId, string? workerId, JobState? state, FailureCategory category, string message, string? dataJson, CancellationToken cancellationToken) =>
         events.AppendAsync(CreateEvent(jobId, attemptId, workerId, state, category, message, dataJson), cancellationToken);
 }
+
+
+
+
+
+
 

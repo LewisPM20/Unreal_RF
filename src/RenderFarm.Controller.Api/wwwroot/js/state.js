@@ -6,6 +6,11 @@ export const state = {
   busy: false,
   selectedJobId: null,
   queueFilter: 'all',
+  selectedProjectId: null,
+  selectedProjectTab: 'profiles',
+  projectProfileSearch: '',
+  projectProfileType: '',
+  projectProfileSort: 'name',
   chunkPreview: null,
   refreshTimer: null,
   notificationsPrimed: false,
@@ -61,3 +66,4 @@ export function setRenderDefaults(defaults) {
 export function renderDefaults() {
   return state.renderDefaults;
 }
+

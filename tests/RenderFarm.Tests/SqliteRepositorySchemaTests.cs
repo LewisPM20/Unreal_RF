@@ -2,6 +2,7 @@ using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Options;
 using RenderFarm.Domain;
 using RenderFarm.Persistence;
+using RenderFarm.Shared;
 using Xunit;
 
 namespace RenderFarm.Tests;
@@ -98,7 +99,7 @@ public sealed class SqliteRepositorySchemaTests
         var now = DateTimeOffset.UtcNow;
         await ((IProjectRepository)repository).UpsertAsync(new ProjectProfile("project-1", "Project", "D:\\Project\\Project.uproject", "5.7", ["5.7"], null, []), CancellationToken.None);
         await ((IRenderProfileRepository)repository).UpsertAsync(new RenderProfile("profile-1", "project-1", "Main", RenderProfileType.MrqQueue, "/Game/Main", null, "png", false, new Dictionary<string, string>()), CancellationToken.None);
-        await ((IWorkerRepository)repository).UpsertAsync(new RenderFarm.Domain.Worker("worker-1", "Worker", "host", "127.0.0.1", null, WorkerStatus.Idle, null, null, "test", WorkerCapabilities.Empty, null, now, now), CancellationToken.None);
+        await ((IWorkerRepository)repository).UpsertAsync(new RenderFarm.Domain.Worker("worker-1", "Worker", "host", "127.0.0.1", null, WorkerStatus.Idle, null, null, RenderFarmVersion.FormatWorkerAgentVersion(RenderFarmVersion.ProductVersion, RenderFarmVersion.ProtocolVersion, RenderFarmVersion.ApiContractVersion, RenderFarmVersion.BuildId), WorkerCapabilities.Empty, null, now, now), CancellationToken.None);
     }
 
     private static async Task<long> ScalarLongAsync(SqliteConnection connection, string sql)
@@ -122,3 +123,5 @@ public sealed class SqliteRepositorySchemaTests
         return values;
     }
 }
+
+

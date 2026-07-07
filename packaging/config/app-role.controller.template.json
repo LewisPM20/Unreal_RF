@@ -1,9 +1,9 @@
 {
   "role": "controller",
-  "hostName": "127.0.0.1",
+  "hostName": "0.0.0.0",
   "port": 9200,
   "controllerUrl": "",
-  "discoveryEnabled": false,
+  "discoveryEnabled": true,
   "discoverySeconds": 5,
   "discoveryPort": 39200,
   "workerId": "",
@@ -12,5 +12,8 @@
   "unrealSearchRoot": "",
   "projectPath": "",
   "sharedOutputRoot": "",
-  "updatedUtc": "2026-06-29T00:00:00+00:00"
+  "updatedUtc": "2026-06-29T01:00:00+01:00",
+  "lanScanEnabled": true,
+  "lanScanTimeoutSeconds": 4,
+  "lanScanMaxHosts": 254
 }

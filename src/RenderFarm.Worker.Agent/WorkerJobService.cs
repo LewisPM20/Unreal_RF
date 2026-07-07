@@ -19,6 +19,7 @@ public sealed class WorkerJobService(
     IUnrealProcessLauncher unrealProcessLauncher,
     IUnrealCommandBuilder unrealCommandBuilder,
     ISharedOutputValidator sharedOutputValidator,
+    IWorkerPreflightService preflightService,
     ILogger<WorkerJobService> logger) : BackgroundService
 {
     private readonly SemaphoreSlim _jobLock = new(1, 1);
@@ -47,19 +48,30 @@ public sealed class WorkerJobService(
             WorkerHttp.ApplyControllerToken(client, options.Value.ApiToken);
             var controller = await controllerEndpoints.GetControllerBaseUriAsync(cancellationToken);
             var workerId = identity.GetWorkerId();
-            using var assignmentResponse = await client.PostAsync(new Uri(controller, $"api/workers/{Uri.EscapeDataString(workerId)}/request-job"), null, cancellationToken);
+            var endpoint = new Uri(controller, $"api/workers/{Uri.EscapeDataString(workerId)}/request-job");
+            logger.LogDebug("Worker {WorkerId} polling controller {ControllerUrl} for work at {Endpoint}; interval {PollingSeconds}s", workerId, controller, endpoint, Math.Max(2, options.Value.JobPollingSeconds));
+            using var assignmentResponse = await client.PostAsync(endpoint, null, cancellationToken);
             if (assignmentResponse.StatusCode == HttpStatusCode.NoContent)
             {
+                logger.LogDebug("Worker {WorkerId} poll returned no job from {Endpoint}.", workerId, endpoint);
                 return;
             }
 
-            assignmentResponse.EnsureSuccessStatusCode();
+            if (!assignmentResponse.IsSuccessStatusCode)
+            {
+                var body = await assignmentResponse.Content.ReadAsStringAsync(cancellationToken);
+                logger.LogWarning("Worker {WorkerId} poll failed with HTTP {StatusCode} from {Endpoint}: {Body}", workerId, (int)assignmentResponse.StatusCode, endpoint, TruncateForLog(body));
+                assignmentResponse.EnsureSuccessStatusCode();
+            }
+
             var assignment = await assignmentResponse.Content.ReadFromJsonAsync<JobAssignmentDto>(RenderFarmJson.SerializerOptions, cancellationToken);
             if (assignment?.Assigned != true || assignment.Job is null || assignment.Attempt is null || assignment.Lease is null)
             {
+                logger.LogInformation("Worker {WorkerId} poll returned no assignment: {Message}", workerId, assignment?.Message ?? "empty response");
                 return;
             }
 
+            logger.LogInformation("Worker {WorkerId} leased job {JobId}, attempt {AttemptId}, lease {LeaseId}", workerId, assignment.Job.Id, assignment.Attempt.Id, assignment.Lease.Id);
             await RunAssignedJobAsync(client, controller, assignment, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -84,10 +96,19 @@ public sealed class WorkerJobService(
 
         try
         {
-            await PostRequiredAsync(client, new Uri(controller, $"api/jobs/{Uri.EscapeDataString(job.Id)}/start"), new JobStartRequest(lease.Id, workerId, "Worker started Unreal render"), cancellationToken);
             var request = assignment.Execution is not null
                 ? BuildRenderRequest(job, attempt, assignment.Execution)
                 : await BuildLegacyRenderRequestAsync(client, controller, job, attempt, cancellationToken);
+            var preflight = await preflightService.RunAsync(request, controller, cancellationToken);
+            await PostPreflightEventAsync(client, controller, job.Id, attempt.Id, workerId, preflight, cancellationToken);
+            if (preflight.Status == PreflightOverallStatus.Blocked)
+            {
+                await PostRequiredAsync(client, new Uri(controller, $"api/jobs/{Uri.EscapeDataString(job.Id)}/fail"), new JobFailureRequest(lease.Id, workerId, FailureCategory.CommandValidationFailed, preflight.Summary, null, RetryEligible: false, Preflight: preflight), cancellationToken);
+                await executionState.ClearAsync(CancellationToken.None);
+                return;
+            }
+
+            await PostRequiredAsync(client, new Uri(controller, $"api/jobs/{Uri.EscapeDataString(job.Id)}/start"), new JobStartRequest(lease.Id, workerId, preflight.Status == PreflightOverallStatus.Warning ? $"Worker started Unreal render after preflight warnings: {preflight.Summary}" : "Worker started Unreal render after preflight passed"), cancellationToken);
             var outputValidation = await sharedOutputValidator.ValidateAsync(new SharedOutputValidationRequest(request.OutputDirectory, ".", true), cancellationToken);
             if (!outputValidation.Ok)
             {
@@ -157,14 +178,14 @@ public sealed class WorkerJobService(
                 var verification = VerifyRenderOutput(request, successLog);
                 if (!verification.Ok)
                 {
-                    await PostRequiredAsync(client, new Uri(controller, $"api/jobs/{Uri.EscapeDataString(job.Id)}/fail"), new JobFailureRequest(lease.Id, workerId, verification.FailureCategory, verification.Error ?? "Render completed but expected output was not found.", result.ExitCode, RetryEligible: false), cancellationToken);
+                    await PostRequiredAsync(client, new Uri(controller, $"api/jobs/{Uri.EscapeDataString(job.Id)}/fail"), new JobFailureRequest(lease.Id, workerId, verification.FailureCategory, verification.Error ?? "Render completed but expected output was not found.", result.ExitCode, RetryEligible: false, OutputValidation: verification.OutputValidation), cancellationToken);
                     await executionState.ClearAsync(CancellationToken.None);
                     return;
                 }
 
 
 
-                await PostRequiredAsync(client, new Uri(controller, $"api/jobs/{Uri.EscapeDataString(job.Id)}/complete"), new JobCompletionRequest(lease.Id, workerId, result.ExitCode, verification.ArtifactSummary?.OutputDirectory ?? request.OutputDirectory, verification.Warning ?? "Unreal render completed and output was verified", verification.ArtifactSummary), cancellationToken);
+                await PostRequiredAsync(client, new Uri(controller, $"api/jobs/{Uri.EscapeDataString(job.Id)}/complete"), new JobCompletionRequest(lease.Id, workerId, result.ExitCode, verification.ArtifactSummary?.OutputDirectory ?? request.OutputDirectory, verification.Warning ?? "Unreal render completed and output was verified", verification.ArtifactSummary, verification.OutputValidation), cancellationToken);
                 await executionState.ClearAsync(CancellationToken.None);
                 return;
             }
@@ -315,29 +336,19 @@ public sealed class WorkerJobService(
 
     private static RenderOutputVerificationResult VerifyRenderOutput(UnrealRenderRequest request, string logText)
     {
-        var supportedExtensions = GetSupportedOutputExtensions().ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var expectedDirectory = request.OutputDirectory;
-        var files = ScanOutputFiles(expectedDirectory, supportedExtensions);
-        if (files.Length > 0)
+        var summary = RenderOutputValidator.Validate(request, logText);
+        if (summary.Status == OutputValidationStatus.Passed && summary.ArtifactSummary is not null)
         {
-            return RenderOutputVerificationResult.Success(BuildArtifactSummary(expectedDirectory, files));
+            return RenderOutputVerificationResult.Success(summary.ArtifactSummary, summary.Message, summary);
         }
 
-        var fallback = FindFallbackOutput(request, supportedExtensions);
-        if (fallback is not null)
-        {
-            var warning = $"Render completed, but output was written to a different location: {fallback.Value.Directory}.";
-            return RenderOutputVerificationResult.Success(BuildArtifactSummary(fallback.Value.Directory, fallback.Value.Files), warning);
-        }
-
-        if (LogIndicatesMovieRenderCompleted(logText))
-        {
-            var warning = $"Render completed, but no output files were found in the expected output directory. Check whether the MRQ preset wrote to a different folder: {expectedDirectory}.";
-            return RenderOutputVerificationResult.Success(new RenderArtifactSummaryDto(expectedDirectory, 0, 0, Array.Empty<string>(), Array.Empty<string>()), warning);
-        }
-
-        var extensions = string.Join(", ", supportedExtensions.OrderBy(x => x, StringComparer.OrdinalIgnoreCase).Select(x => "." + x));
-        return RenderOutputVerificationResult.Fail(FailureCategory.RenderOutputMissing, $"Render completed but no non-empty supported output files ({extensions}) were found in {expectedDirectory}.");
+        var message = string.IsNullOrWhiteSpace(summary.SuggestedFix)
+            ? summary.Message
+            : $"{summary.Message} Suggested fix: {summary.SuggestedFix}";
+        var category = summary.Mode == OutputValidationMode.StrictFrameSequence
+            ? FailureCategory.RenderOutputIncomplete
+            : FailureCategory.RenderOutputMissing;
+        return RenderOutputVerificationResult.Fail(category, message, summary);
     }
 
     private static FileInfo[] ScanOutputFiles(string directory, ISet<string> supportedExtensions)
@@ -434,6 +445,30 @@ public sealed class WorkerJobService(
     private static string CombineLogText(params string?[] parts) =>
         string.Join(Environment.NewLine, parts.Where(part => !string.IsNullOrWhiteSpace(part))).Trim();
 
+    private static string TruncateForLog(string? value, int maxCharacters = 2000)
+    {
+        if (string.IsNullOrEmpty(value) || value.Length <= maxCharacters)
+        {
+            return value ?? string.Empty;
+        }
+
+        return value[..maxCharacters] + "...";
+    }
+
+    private static async Task PostPreflightEventAsync(HttpClient client, Uri controller, string jobId, string attemptId, string workerId, PreflightResultDto preflight, CancellationToken cancellationToken)
+    {
+        var evt = new JobEventDto(
+            Guid.NewGuid().ToString("N"),
+            jobId,
+            attemptId,
+            workerId,
+            JobState.ValidatingWorker,
+            preflight.Status == PreflightOverallStatus.Blocked ? FailureCategory.CommandValidationFailed : FailureCategory.None,
+            $"Worker preflight: {preflight.Summary}",
+            DateTimeOffset.UtcNow,
+            JsonSerializer.Serialize(new { preflight }, RenderFarmJson.SerializerOptions));
+        await PostRequiredAsync(client, new Uri(controller, $"api/jobs/{Uri.EscapeDataString(jobId)}/events"), evt, cancellationToken);
+    }
     private static async Task PostRenderLogDiagnosticsAsync(HttpClient client, Uri controller, string jobId, string attemptId, string workerId, FailureCategory category, RenderLogClassificationDto classification, CancellationToken cancellationToken)
     {
         if (classification.Diagnostics.Count == 0 && classification.LoadErrors.Count == 0 && string.IsNullOrWhiteSpace(classification.RawExcerpt))
@@ -457,10 +492,10 @@ public sealed class WorkerJobService(
     {
         public FailureCategory FailureCategory { get; } = failureCategory;
     }
-    private sealed record RenderOutputVerificationResult(bool Ok, FailureCategory FailureCategory, string? Error, RenderArtifactSummaryDto? ArtifactSummary, string? Warning = null)
+    private sealed record RenderOutputVerificationResult(bool Ok, FailureCategory FailureCategory, string? Error, RenderArtifactSummaryDto? ArtifactSummary, string? Warning = null, OutputValidationSummaryDto? OutputValidation = null)
     {
-        public static RenderOutputVerificationResult Success(RenderArtifactSummaryDto summary, string? warning = null) => new(true, FailureCategory.None, null, summary, warning);
-        public static RenderOutputVerificationResult Fail(FailureCategory category, string error) => new(false, category, error, null);
+        public static RenderOutputVerificationResult Success(RenderArtifactSummaryDto summary, string? warning = null, OutputValidationSummaryDto? outputValidation = null) => new(true, FailureCategory.None, null, summary, warning, outputValidation);
+        public static RenderOutputVerificationResult Fail(FailureCategory category, string error, OutputValidationSummaryDto? outputValidation = null) => new(false, category, error, null, null, outputValidation);
     }
 
     private async Task<UnrealRenderRequest> BuildLegacyRenderRequestAsync(HttpClient client, Uri controller, RenderJobDto job, JobAttemptDto attempt, CancellationToken cancellationToken)
@@ -603,6 +638,12 @@ public sealed class WorkerJobService(
 
     private static string FirstNonEmpty(params string?[] values) => values.FirstOrDefault(x => !string.IsNullOrWhiteSpace(x)) ?? string.Empty;
 }
+
+
+
+
+
+
 
 
 

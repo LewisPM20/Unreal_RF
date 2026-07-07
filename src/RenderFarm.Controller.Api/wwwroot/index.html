@@ -43,11 +43,11 @@
           <p id="controllerVersion" class="subtle">Connecting to controller...</p>
         </div>
         <div class="header-actions">
-          <label class="search">
+          <label class="search worker-header-control">
             <span>Search workers</span>
             <input id="searchBox" type="search" placeholder="Search workers, hosts, status">
           </label>
-          <select id="statusFilter" aria-label="Worker status filter">
+          <select id="statusFilter" class="worker-header-control" aria-label="Worker status filter">
             <option value="">All workers</option>
             <option value="pending">Pending approval</option>
             <option value="idle">Idle</option>
@@ -139,29 +139,20 @@
       </section>
 
       <section class="view" data-panel="projects">
-        <div class="dashboard-grid">
-          <section class="panel">
-            <div class="panel-head">
+        <section class="project-workbench panel wide">
+          <aside class="project-rail" aria-label="Projects">
+            <div class="project-rail-head">
               <div>
+                <p class="eyebrow">Project library</p>
                 <h2>Projects</h2>
-                <p>Registered Unreal projects with per-worker path mappings.</p>
               </div>
-              <button class="button primary" data-modal-target="projectModal" type="button">Add project</button>
+              <button class="button primary compact-button" data-modal-target="projectModal" type="button">Add project</button>
             </div>
-            <div id="projects" class="stack"></div>
-          </section>
-          <section class="panel">
-            <div class="panel-head">
-              <div>
-                <h2>Render Profiles</h2>
-                <p>Reusable launch definitions for queueable renders.</p>
-              </div>
-              <button class="button primary" data-modal-target="profileModal" type="button">Add profile</button>
-            </div>
-            <div id="profiles" class="stack"></div>
-          </section>
-
-        </div>
+            <div id="projects" class="project-list"></div>
+          </aside>
+          <div id="selectedProjectPanel" class="project-main"></div>
+        </section>
+        <div id="profiles" class="hidden" aria-hidden="true"></div>
       </section>
 
       <section class="view" data-panel="queue">
@@ -605,6 +596,7 @@
     </form>
   </dialog></body>
 </html>
+
 
 
 

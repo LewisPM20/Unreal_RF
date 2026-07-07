@@ -41,27 +41,49 @@ public static class WorkerEndpoints
             }
 
             var reported = heartbeat.ToWorker(receivedAtUtc);
+            var compatibility = RenderFarmVersion.EvaluateWorkerAgent(reported.AgentVersion);
             var status = approval switch
             {
+                WorkerApproval.Accepted when !compatibility.Compatible => WorkerStatus.IncompatibleVersion,
                 WorkerApproval.Accepted => reported.Status,
                 WorkerApproval.Rejected => WorkerStatus.Rejected,
                 _ => WorkerStatus.Pending
             };
-            var worker = reported with { Status = status, RegisteredAtUtc = existing?.RegisteredAtUtc ?? receivedAtUtc };
+            var worker = reported with
+            {
+                Status = status,
+                LastError = compatibility.Compatible ? reported.LastError : compatibility.Reason,
+                RegisteredAtUtc = existing?.RegisteredAtUtc ?? receivedAtUtc
+            };
             await workers.UpsertAsync(worker, ct);
             if (existing is null)
             {
                 activity.Add(
-                    approval == WorkerApproval.Accepted ? "success" : "warning",
+                    approval == WorkerApproval.Accepted && compatibility.Compatible ? "success" : "warning",
                     "Worker",
-                    approval == WorkerApproval.Accepted ? "Worker connected" : "Worker awaiting approval",
-                    $"{worker.Name} reported from {worker.Hostname ?? worker.IpAddress ?? "unknown host"}.",
+                    approval == WorkerApproval.Accepted && compatibility.Compatible ? "Worker connected" : approval == WorkerApproval.Accepted ? "Worker incompatible" : "Worker awaiting approval",
+                    compatibility.Compatible ? $"{worker.Name} reported from {worker.Hostname ?? worker.IpAddress ?? "unknown host"}." : compatibility.Reason,
                     workerId: worker.Id,
                     actionRoute: "workers");
             }
+            else if (!compatibility.Compatible && existing.Status != WorkerStatus.IncompatibleVersion)
+            {
+                activity.Add("warning", "Worker", "Worker incompatible", compatibility.Reason, workerId: worker.Id, actionRoute: "workers");
+            }
 
             var schedulingMode = await WorkerScheduling.GetAsync(settings, heartbeat.WorkerId, ct);
-            return Results.Ok(new { accepted = approval == WorkerApproval.Accepted, approval, scheduling_mode = schedulingMode, worker_id = heartbeat.WorkerId, received_at_utc = receivedAtUtc });
+            return Results.Ok(new
+            {
+                accepted = approval == WorkerApproval.Accepted && compatibility.Compatible,
+                approval,
+                scheduling_mode = schedulingMode,
+                worker_id = heartbeat.WorkerId,
+                received_at_utc = receivedAtUtc,
+                controller_version = RenderFarmVersion.ProductVersion,
+                required_worker_version = RenderFarmVersion.MinimumWorkerProductVersion,
+                protocol_version = RenderFarmVersion.ProtocolVersion,
+                compatibility
+            });
         });
 
         group.MapGet("/pending", async (IWorkerRepository workers, ISettingsRepository settings, CancellationToken ct) =>
@@ -76,8 +98,11 @@ public static class WorkerEndpoints
             await WorkerApproval.SetAsync(settings, workerId, WorkerApproval.Accepted, ct);
             if (await workers.GetAsync(workerId, ct) is { } worker)
             {
-                var status = worker.Status is WorkerStatus.Pending or WorkerStatus.Rejected or WorkerStatus.Unknown ? WorkerStatus.Idle : worker.Status;
-                await workers.UpsertAsync(worker with { Status = status }, ct);
+                var compatibility = RenderFarmVersion.EvaluateWorkerAgent(worker.AgentVersion);
+                var status = !compatibility.Compatible
+                    ? WorkerStatus.IncompatibleVersion
+                    : worker.Status is WorkerStatus.Pending or WorkerStatus.Rejected or WorkerStatus.Unknown ? WorkerStatus.Idle : worker.Status;
+                await workers.UpsertAsync(worker with { Status = status, LastError = compatibility.Compatible ? worker.LastError : compatibility.Reason }, ct);
             }
 
             activity.Add("success", "Approval", "Worker approved", $"Worker {workerId} can now receive jobs.", workerId: workerId, actionRoute: "workers");
@@ -191,6 +216,11 @@ public static class WorkerEndpoints
                 dto.Stage,
                 dto.CurrentJobId,
                 dto.AgentVersion,
+                dto.ProductVersion,
+                dto.ProtocolVersion,
+                dto.ApiContractVersion,
+                dto.BuildId,
+                dto.Compatibility,
                 dto.Capabilities,
                 dto.LastError,
                 dto.RegisteredAtUtc,
@@ -200,6 +230,9 @@ public static class WorkerEndpoints
         });
     }
 }
+
+
+
 
 
 
